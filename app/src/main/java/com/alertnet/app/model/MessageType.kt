@@ -13,6 +13,8 @@ enum class MessageType {
     IMAGE,
     /** File attachment (payload contains base64-encoded file) */
     FILE,
+    /** Voice recording (payload contains local file path) */
+    VOICE,
     /** Delivery acknowledgment routed back to sender */
     ACK,
     /** Periodic peer presence announcement */

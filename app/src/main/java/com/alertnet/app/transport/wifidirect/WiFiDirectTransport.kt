@@ -24,6 +24,7 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
+import com.alertnet.app.transfer.FileTransferManager
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -79,6 +80,9 @@ class WiFiDirectTransport(
     private var isRunning = false
     private var isGroupOwner = false
     private var groupOwnerAddress: String? = null
+
+    /** Set by MeshManager after construction to enable binary file transfers */
+    var fileTransferManager: FileTransferManager? = null
 
     // ─── Lifecycle ───────────────────────────────────────────────
 
@@ -327,12 +331,14 @@ class WiFiDirectTransport(
     }
 
     /**
-     * Handle an incoming client connection using length-prefixed framing.
+     * Handle an incoming client connection with type-byte dispatch.
      *
      * Protocol:
-     * 1. Read 4 bytes → payload length (big-endian int)
-     * 2. Read N bytes → payload data
-     * 3. First message from a new peer should be a device ID handshake
+     * 1. Read 1 byte → frame type (0x00 = JSON, 0x01 = binary file)
+     * 2. Dispatch to appropriate handler
+     *
+     * Legacy support: If the first byte looks like part of a 4-byte int
+     * (i.e., old protocol without type prefix), fall back to JSON handling.
      */
     private suspend fun handleClientConnection(socket: Socket) {
         val senderIP = socket.inetAddress?.hostAddress ?: "unknown"
@@ -340,79 +346,141 @@ class WiFiDirectTransport(
         try {
             val inputStream = DataInputStream(BufferedInputStream(socket.getInputStream()))
 
-            // Read length prefix
-            val length = inputStream.readInt()
+            // Read type byte
+            val typeByte = inputStream.readByte().toInt() and 0xFF
 
-            if (length <= 0 || length > MAX_PAYLOAD_SIZE) {
-                Log.e(TAG, "Invalid payload length: $length from $senderIP")
-                return
+            when (typeByte) {
+                0x00 -> handleJsonMessage(inputStream, senderIP)
+                0x01 -> handleBinaryTransfer(inputStream, senderIP)
+                else -> {
+                    // Legacy compatibility: treat as first byte of a 4-byte length
+                    Log.w(TAG, "Unknown type byte $typeByte from $senderIP, trying legacy parse")
+                    handleLegacyMessage(typeByte, inputStream, senderIP)
+                }
             }
-
-            // Read payload
-            val data = ByteArray(length)
-            inputStream.readFully(data)
-
-            Log.d(TAG, "Received $length bytes from $senderIP")
-
-            // Check if it's a handshake (device ID announcement)
-            val text = String(data, Charsets.UTF_8)
-            if (text.startsWith("MESH_ID:")) {
-                val meshId = text.removePrefix("MESH_ID:")
-                peerIpMap[meshId] = senderIP
-                Log.d(TAG, "Peer $meshId registered at $senderIP")
-
-                // Find the existing peer entry
-                var existingPeer = peersMap.values.find { it.ipAddress == senderIP }
-                if (existingPeer == null && !isGroupOwner && senderIP == groupOwnerAddress) {
-                    // We are the client receiving the GO's handshake. 
-                    // Find our single connected GO peer.
-                    existingPeer = peersMap.values.find { it.isConnected && it.transportType == TransportType.WIFI_DIRECT }
-                }
-
-                val peer = if (existingPeer != null) {
-                    // Upgrade the existing MAC-based peer to UUID-based
-                    peersMap.remove(existingPeer.deviceId)
-                    existingPeer.copy(
-                        deviceId = meshId,
-                        ipAddress = senderIP
-                    )
-                } else {
-                    MeshPeer(
-                        deviceId = meshId,
-                        displayName = "Peer-${meshId.take(8)}",
-                        transportType = TransportType.WIFI_DIRECT,
-                        ipAddress = senderIP,
-                        isConnected = true
-                    )
-                }
-
-                peersMap[meshId] = peer
-                _discoveredPeers.value = peersMap.values.toList()
-                _connectionEvents.emit(ConnectionEvent.PeerConnected(peer))
-
-                // If we are the Group Owner, we must reply with our own MESH_ID
-                // so the client learns our UUID instead of just our MAC address.
-                if (isGroupOwner) {
-                    scope.launch {
-                        sendDeviceIdHandshake(senderIP)
-                    }
-                }
-                return
-            }
-
-            // Regular message
-            val senderId = peerIpMap.entries.find { it.value == senderIP }?.key ?: senderIP
-            _incomingMessages.emit(
-                TransportMessage(
-                    data = data,
-                    senderPeerId = senderId,
-                    transportType = TransportType.WIFI_DIRECT
-                )
-            )
         } catch (e: Exception) {
             Log.e(TAG, "Error handling connection from $senderIP", e)
         } finally {
             try { socket.close() } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * Handle a JSON-framed message (type byte 0x00).
+     * Frame: [4-byte length][JSON payload]
+     */
+    private suspend fun handleJsonMessage(inputStream: DataInputStream, senderIP: String) {
+        val length = inputStream.readInt()
+
+        if (length <= 0 || length > MAX_PAYLOAD_SIZE) {
+            Log.e(TAG, "Invalid payload length: $length from $senderIP")
+            return
+        }
+
+        val data = ByteArray(length)
+        inputStream.readFully(data)
+
+        Log.d(TAG, "Received $length bytes (JSON) from $senderIP")
+
+        // Check if it's a handshake
+        val text = String(data, Charsets.UTF_8)
+        if (text.startsWith("MESH_ID:")) {
+            handleHandshake(text, senderIP)
+            return
+        }
+
+        // Regular message
+        val senderId = peerIpMap.entries.find { it.value == senderIP }?.key ?: senderIP
+        _incomingMessages.emit(
+            TransportMessage(
+                data = data,
+                senderPeerId = senderId,
+                transportType = TransportType.WIFI_DIRECT
+            )
+        )
+    }
+
+    /**
+     * Handle a binary file transfer (type byte 0x01).
+     * Delegates to [FileTransferManager] for chunked receive.
+     */
+    private suspend fun handleBinaryTransfer(inputStream: DataInputStream, senderIP: String) {
+        val ftm = fileTransferManager
+        if (ftm == null) {
+            Log.e(TAG, "Binary transfer received but FileTransferManager not set")
+            return
+        }
+        Log.d(TAG, "Binary transfer incoming from $senderIP")
+        ftm.handleIncomingTransfer(inputStream, senderIP)
+    }
+
+    /**
+     * Legacy fallback: reconstruct the 4-byte length from the type byte + 3 more bytes.
+     * Supports old peers that don't send the type prefix.
+     */
+    private suspend fun handleLegacyMessage(firstByte: Int, inputStream: DataInputStream, senderIP: String) {
+        // Reconstruct length: firstByte is the MSB of a 4-byte big-endian int
+        val b2 = inputStream.readByte().toInt() and 0xFF
+        val b3 = inputStream.readByte().toInt() and 0xFF
+        val b4 = inputStream.readByte().toInt() and 0xFF
+        val length = (firstByte shl 24) or (b2 shl 16) or (b3 shl 8) or b4
+
+        if (length <= 0 || length > MAX_PAYLOAD_SIZE) {
+            Log.e(TAG, "Invalid legacy payload length: $length from $senderIP")
+            return
+        }
+
+        val data = ByteArray(length)
+        inputStream.readFully(data)
+
+        val text = String(data, Charsets.UTF_8)
+        if (text.startsWith("MESH_ID:")) {
+            handleHandshake(text, senderIP)
+            return
+        }
+
+        val senderId = peerIpMap.entries.find { it.value == senderIP }?.key ?: senderIP
+        _incomingMessages.emit(
+            TransportMessage(
+                data = data,
+                senderPeerId = senderId,
+                transportType = TransportType.WIFI_DIRECT
+            )
+        )
+    }
+
+    /**
+     * Process a MESH_ID handshake from a peer.
+     */
+    private suspend fun handleHandshake(text: String, senderIP: String) {
+        val meshId = text.removePrefix("MESH_ID:")
+        peerIpMap[meshId] = senderIP
+        Log.d(TAG, "Peer $meshId registered at $senderIP")
+
+        var existingPeer = peersMap.values.find { it.ipAddress == senderIP }
+        if (existingPeer == null && !isGroupOwner && senderIP == groupOwnerAddress) {
+            existingPeer = peersMap.values.find { it.isConnected && it.transportType == TransportType.WIFI_DIRECT }
+        }
+
+        val peer = if (existingPeer != null) {
+            peersMap.remove(existingPeer.deviceId)
+            existingPeer.copy(deviceId = meshId, ipAddress = senderIP)
+        } else {
+            MeshPeer(
+                deviceId = meshId,
+                displayName = "Peer-${meshId.take(8)}",
+                transportType = TransportType.WIFI_DIRECT,
+                ipAddress = senderIP,
+                isConnected = true
+            )
+        }
+
+        peersMap[meshId] = peer
+        _discoveredPeers.value = peersMap.values.toList()
+        _connectionEvents.emit(ConnectionEvent.PeerConnected(peer))
+
+        if (isGroupOwner) {
+            scope.launch { sendDeviceIdHandshake(senderIP) }
         }
     }
 
@@ -436,7 +504,8 @@ class WiFiDirectTransport(
 
                 val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
 
-                // Write length-prefixed frame
+                // Write type byte + length-prefixed frame
+                outputStream.writeByte(0x00) // JSON message type
                 outputStream.writeInt(data.size)
                 outputStream.write(data)
                 outputStream.flush()
@@ -503,6 +572,7 @@ class WiFiDirectTransport(
                 socket.connect(InetSocketAddress(targetIP, PORT), SOCKET_TIMEOUT_MS)
 
                 val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
+                outputStream.writeByte(0x00) // JSON message type
                 outputStream.writeInt(handshake.size)
                 outputStream.write(handshake)
                 outputStream.flush()
@@ -512,6 +582,71 @@ class WiFiDirectTransport(
             } catch (e: Exception) {
                 Log.e(TAG, "Handshake to $targetIP failed", e)
             }
+        }
+    }
+
+    // ─── Binary File Transfer ────────────────────────────────────
+
+    /**
+     * Stream a binary file to a peer using the chunked binary protocol.
+     *
+     * Wire format: [0x01][4-byte header len][header JSON][raw file bytes]
+     *
+     * @param peerId Target peer's device ID
+     * @param header Serialized [FileTransferHeader] JSON bytes
+     * @param fileStream InputStream of the file to send
+     * @param fileSize Total file size in bytes
+     * @param onProgress Callback with bytes sent so far
+     * @return true if the entire file was sent successfully
+     */
+    suspend fun sendBinaryTransfer(
+        peerId: String,
+        header: ByteArray,
+        fileStream: java.io.InputStream,
+        fileSize: Long,
+        onProgress: (Long) -> Unit
+    ): Boolean = withContext(Dispatchers.IO) {
+        val targetIP = resolveIP(peerId) ?: run {
+            Log.w(TAG, "Cannot resolve IP for binary transfer to: $peerId")
+            fileStream.close()
+            return@withContext false
+        }
+
+        try {
+            val socket = Socket()
+            socket.connect(InetSocketAddress(targetIP, PORT), 30_000) // 30s timeout for large files
+
+            val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
+
+            // Type byte
+            outputStream.writeByte(0x01)
+
+            // Header
+            outputStream.writeInt(header.size)
+            outputStream.write(header)
+
+            // Stream file in chunks
+            val buffer = ByteArray(65536) // 64KB chunks
+            var totalSent = 0L
+
+            while (totalSent < fileSize) {
+                val read = fileStream.read(buffer)
+                if (read == -1) break
+                outputStream.write(buffer, 0, read)
+                totalSent += read
+                onProgress(totalSent)
+            }
+
+            outputStream.flush()
+            socket.close()
+            fileStream.close()
+
+            Log.d(TAG, "Binary transfer complete: $totalSent bytes to $peerId")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Binary transfer to $peerId failed", e)
+            try { fileStream.close() } catch (_: Exception) {}
+            false
         }
     }
 

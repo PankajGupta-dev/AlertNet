@@ -3,21 +3,25 @@ package com.alertnet.app.ui.viewmodel
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.alertnet.app.media.PlayerState
+import com.alertnet.app.media.RecorderState
 import com.alertnet.app.mesh.MeshManager
 import com.alertnet.app.model.DeliveryStatus
 import com.alertnet.app.model.MeshMessage
 import com.alertnet.app.model.MessageType
+import com.alertnet.app.model.TransferProgress
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
+import java.io.File
 
 /**
  * ViewModel for the chat screen.
  *
- * Provides reactive message list, send operations, and message expiry
- * when the user navigates away from the chat.
+ * Provides reactive message list, send operations, voice recording/playback,
+ * file transfer progress, and message expiry when the user navigates away.
  */
 class ChatViewModel(
     private val meshManager: MeshManager,
@@ -34,6 +38,39 @@ class ChatViewModel(
     val sendingState: StateFlow<SendingState> = _sendingState.asStateFlow()
 
     private var pollJob: Job? = null
+
+    // ─── Voice Recording ─────────────────────────────────────────
+
+    /** Voice recorder state (IDLE / RECORDING) */
+    val voiceRecorderState: StateFlow<RecorderState> = meshManager.voiceRecorder.state
+
+    /** Recording amplitude for waveform UI */
+    val voiceAmplitude: StateFlow<Int> = meshManager.voiceRecorder.amplitude
+
+    /** Recording duration in ms */
+    val voiceRecordingDuration: StateFlow<Long> = meshManager.voiceRecorder.durationMs
+
+    // ─── Voice Playback ──────────────────────────────────────────
+
+    /** Voice player state (IDLE / LOADING / PLAYING / PAUSED / ERROR) */
+    val voicePlayerState: StateFlow<PlayerState> = meshManager.voicePlayer.state
+
+    /** Currently playing message ID */
+    val playingMessageId: StateFlow<String?> = meshManager.voicePlayer.currentMessageId
+
+    /** Playback progress (0.0 – 1.0) */
+    val playbackProgress: StateFlow<Float> = meshManager.voicePlayer.progress
+
+    /** Playback duration in ms */
+    val playbackDuration: StateFlow<Int> = meshManager.voicePlayer.durationMs
+
+    // ─── Transfer Progress ───────────────────────────────────────
+
+    /** Active file transfer progress map */
+    val activeTransfers: StateFlow<Map<String, TransferProgress>> =
+        meshManager.fileTransferManager.activeTransfers
+
+    // ─── Conversation Lifecycle ──────────────────────────────────
 
     /**
      * Set the peer we're chatting with and start polling the conversation.
@@ -71,6 +108,8 @@ class ChatViewModel(
         }
     }
 
+    // ─── Send Text ───────────────────────────────────────────────
+
     /**
      * Send a text message to the current peer.
      */
@@ -106,8 +145,29 @@ class ChatViewModel(
         }
     }
 
+    // ─── Send Image ──────────────────────────────────────────────
+
     /**
-     * Send a file/image to the current peer.
+     * Send an image from gallery to the current peer.
+     */
+    fun sendImage(uri: Uri) {
+        val peerId = currentPeerId
+
+        _sendingState.value = SendingState.Sending
+
+        viewModelScope.launch {
+            try {
+                meshManager.sendImage(peerId, uri)
+                refreshMessages()
+                _sendingState.value = SendingState.Idle
+            } catch (e: Exception) {
+                _sendingState.value = SendingState.Error(e.message ?: "Image send failed")
+            }
+        }
+    }
+
+    /**
+     * Send a file/image to the current peer (generic picker).
      */
     fun sendFile(uri: Uri) {
         val peerId = currentPeerId
@@ -125,6 +185,93 @@ class ChatViewModel(
         }
     }
 
+    // ─── Voice Recording ─────────────────────────────────────────
+
+    /**
+     * Start recording a voice message.
+     */
+    fun startVoiceRecording() {
+        try {
+            meshManager.voiceRecorder.startRecording()
+        } catch (e: Exception) {
+            _sendingState.value = SendingState.Error(e.message ?: "Recording failed")
+        }
+    }
+
+    /**
+     * Stop recording and send the voice message.
+     */
+    fun stopVoiceRecordingAndSend() {
+        val peerId = currentPeerId ?: return
+
+        val audioFile = meshManager.voiceRecorder.stopRecording() ?: return
+        _sendingState.value = SendingState.Sending
+
+        viewModelScope.launch {
+            try {
+                meshManager.sendVoiceMessage(peerId, audioFile)
+                refreshMessages()
+                _sendingState.value = SendingState.Idle
+            } catch (e: Exception) {
+                _sendingState.value = SendingState.Error(e.message ?: "Voice send failed")
+            }
+        }
+    }
+
+    /**
+     * Cancel the current voice recording.
+     */
+    fun cancelVoiceRecording() {
+        meshManager.voiceRecorder.cancelRecording()
+    }
+
+    // ─── Voice Playback ──────────────────────────────────────────
+
+    /**
+     * Play a received voice message.
+     */
+    fun playVoiceMessage(message: MeshMessage) {
+        if (message.type != MessageType.VOICE) return
+        val fileName = message.payload
+        val filePath = meshManager.getMediaFilePath(fileName)
+
+        if (File(filePath).exists()) {
+            meshManager.voicePlayer.play(message.id, filePath)
+        } else {
+            _sendingState.value = SendingState.Error("Audio file not found")
+        }
+    }
+
+    /**
+     * Pause voice playback.
+     */
+    fun pauseVoicePlayback() {
+        meshManager.voicePlayer.pause()
+    }
+
+    /**
+     * Resume voice playback.
+     */
+    fun resumeVoicePlayback() {
+        meshManager.voicePlayer.resume()
+    }
+
+    /**
+     * Stop voice playback.
+     */
+    fun stopVoicePlayback() {
+        meshManager.voicePlayer.stop()
+    }
+
+    /**
+     * Seek voice playback to a position.
+     */
+    fun seekVoicePlayback(fraction: Float) {
+        meshManager.voicePlayer.seekTo(fraction)
+    }
+
+    // ─── Helpers ─────────────────────────────────────────────────
+
     /**
      * Decrypt a message payload for display.
      */
@@ -132,17 +279,39 @@ class ChatViewModel(
         return when (message.type) {
             MessageType.TEXT -> meshManager.decryptPayload(message.payload)
             MessageType.ACK -> "✓ Delivered"
+            MessageType.IMAGE -> message.fileName ?: "Image"
+            MessageType.VOICE -> formatDuration(message)
             else -> message.fileName ?: "File"
         }
     }
 
     /**
+     * Get the file path for a media message.
+     */
+    fun getMediaFilePath(message: MeshMessage): String? {
+        val fileName = message.payload
+        return if (fileName.isNotBlank()) meshManager.getMediaFilePath(fileName) else null
+    }
+
+    /**
+     * Get transfer progress for a specific message.
+     */
+    fun getTransferProgress(messageId: String): TransferProgress? {
+        return meshManager.fileTransferManager.getProgressForMessage(messageId)
+    }
+
+    private fun formatDuration(message: MeshMessage): String {
+        // Voice messages store duration in the fileName suffix or we show generic label
+        return "Voice message"
+    }
+
+    /**
      * Called when user navigates back from the chat screen.
-     * Deletes conversation messages per the expiry policy.
      */
     fun onBackPressed() {
         val peerId = currentPeerId ?: return
         pollJob?.cancel()
+        meshManager.voicePlayer.stop()
         viewModelScope.launch {
             meshManager.expireConversation(peerId)
         }
@@ -151,7 +320,6 @@ class ChatViewModel(
 
     override fun onCleared() {
         super.onCleared()
-        // Expire conversation when ViewModel is destroyed
         currentPeerId?.let { peerId ->
             viewModelScope.launch {
                 meshManager.expireConversation(peerId)

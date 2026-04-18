@@ -4,18 +4,20 @@ import android.content.Context
 import android.net.Uri
 import android.util.Base64
 import android.util.Log
-import com.alertnet.app.model.DeliveryStatus
-import com.alertnet.app.model.MeshMessage
-import com.alertnet.app.model.MeshPeer
-import com.alertnet.app.model.MessageType
+import com.alertnet.app.media.VoicePlayerManager
+import com.alertnet.app.media.VoiceRecorderManager
+import com.alertnet.app.model.*
 import com.alertnet.app.repository.MessageRepository
 import com.alertnet.app.security.CryptoManager
 import com.alertnet.app.security.KeyManager
+import com.alertnet.app.transfer.FileStorage
+import com.alertnet.app.transfer.FileTransferManager
 import com.alertnet.app.transport.TransportManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.io.File
 import java.util.UUID
 
 /**
@@ -57,6 +59,16 @@ class MeshManager(
     val messageRouter = MessageRouter(deduplicationManager, ackTracker, deviceId)
     val peerDiscoveryManager = PeerDiscoveryManager(transportManager, DiscoveryConfig())
 
+    // ─── Media Components ────────────────────────────────────────
+
+    val fileStorage = FileStorage(context)
+    val fileTransferManager = FileTransferManager(
+        context, deviceId, transportManager.wifiDirectTransport,
+        fileStorage, repository
+    )
+    val voiceRecorder = VoiceRecorderManager(context)
+    val voicePlayer = VoicePlayerManager()
+
     // ─── Public Flows ────────────────────────────────────────────
 
     /** Active mesh peers */
@@ -84,8 +96,14 @@ class MeshManager(
         transportManager.start()
         peerDiscoveryManager.start()
 
+        // Wire FileTransferManager to WiFiDirectTransport for binary receives
+        transportManager.wifiDirectTransport.fileTransferManager = fileTransferManager
+
         // Start message processing pipeline
         startMessageProcessing()
+
+        // Listen for received file transfers
+        startFileReceiveProcessing()
 
         // Start background loops
         startStoreAndForward()
@@ -110,6 +128,9 @@ class MeshManager(
         isRunning = false
         peerDiscoveryManager.stop()
         transportManager.stop()
+        voiceRecorder.release()
+        voicePlayer.release()
+        fileTransferManager.release()
         scope.coroutineContext.cancelChildren()
         Log.d(TAG, "MeshManager stopped")
     }
@@ -153,60 +174,56 @@ class MeshManager(
     }
 
     /**
-     * Send a file or image to a specific peer.
+     * Send an image to a specific peer using streaming binary transfer.
+     *
+     * Uses [FileTransferManager] for efficient chunked transfer (no base64).
      */
-    suspend fun sendFile(targetId: String?, uri: Uri) {
-        withContext(Dispatchers.IO) {
-            try {
-                val contentResolver = context.contentResolver
-                val mimeType = contentResolver.getType(uri) ?: "application/octet-stream"
-                val fileName = uri.lastPathSegment ?: "file"
-
-                // Read file content
-                val inputStream = contentResolver.openInputStream(uri)
-                    ?: throw IllegalStateException("Cannot open file: $uri")
-
-                val fileBytes = inputStream.use { it.readBytes() }
-
-                if (fileBytes.size > MAX_FILE_SIZE) {
-                    Log.e(TAG, "File too large: ${fileBytes.size} bytes (max: $MAX_FILE_SIZE)")
-                    return@withContext
-                }
-
-                // Encode as base64
-                val base64Content = Base64.encodeToString(fileBytes, Base64.NO_WRAP)
-                val encrypted = encryptPayload(base64Content) ?: base64Content
-
-                val type = if (mimeType.startsWith("image/")) MessageType.IMAGE else MessageType.FILE
-
-                val message = MeshMessage(
-                    id = UUID.randomUUID().toString(),
-                    senderId = deviceId,
-                    targetId = targetId,
-                    type = type,
-                    payload = encrypted,
-                    fileName = fileName,
-                    mimeType = mimeType,
-                    timestamp = System.currentTimeMillis(),
-                    ttl = 5, // Lower TTL for files (they're expensive to relay)
-                    hopCount = 0,
-                    hopPath = listOf(deviceId),
-                    status = DeliveryStatus.QUEUED
-                )
-
-                deduplicationManager.markSeen(message.id)
-                repository.insertMessage(message)
-
-                if (targetId != null) {
-                    ackTracker.expectAck(message.id)
-                }
-
-                sendViaTransport(message)
-                updateStats()
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to send file", e)
-            }
+    suspend fun sendImage(targetId: String?, uri: Uri): MeshMessage? {
+        val result = fileTransferManager.sendFile(targetId, uri, MessageType.IMAGE)
+        if (result != null) {
+            deduplicationManager.markSeen(result.id)
+            if (targetId != null) ackTracker.expectAck(result.id)
+            updateStats()
         }
+        return result
+    }
+
+    /**
+     * Send a voice message to a specific peer using streaming binary transfer.
+     *
+     * @param targetId Peer to send to
+     * @param audioFile The recorded .m4a file from [VoiceRecorderManager]
+     */
+    suspend fun sendVoiceMessage(targetId: String?, audioFile: File): MeshMessage? {
+        val result = fileTransferManager.sendVoice(targetId, audioFile)
+        if (result != null) {
+            deduplicationManager.markSeen(result.id)
+            if (targetId != null) ackTracker.expectAck(result.id)
+            updateStats()
+        }
+        return result
+    }
+
+    /**
+     * Send a generic file to a specific peer using streaming binary transfer.
+     */
+    suspend fun sendFile(targetId: String?, uri: Uri): MeshMessage? {
+        val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
+        val type = if (mimeType.startsWith("image/")) MessageType.IMAGE else MessageType.FILE
+        val result = fileTransferManager.sendFile(targetId, uri, type)
+        if (result != null) {
+            deduplicationManager.markSeen(result.id)
+            if (targetId != null) ackTracker.expectAck(result.id)
+            updateStats()
+        }
+        return result
+    }
+
+    /**
+     * Get the absolute path of a received media file.
+     */
+    fun getMediaFilePath(fileName: String): String {
+        return fileStorage.getFilePath(fileName)
     }
 
     /**
@@ -230,6 +247,18 @@ class MeshManager(
     fun decryptPayload(encryptedPayload: String): String {
         val key = KeyManager.getKey(context) ?: return encryptedPayload
         return CryptoManager.decryptString(encryptedPayload, key) ?: encryptedPayload
+    }
+
+    // ─── Internal: File Receive Processing ─────────────────────
+
+    private fun startFileReceiveProcessing() {
+        scope.launch {
+            fileTransferManager.receivedFiles.collect { message ->
+                Log.d(TAG, "File received: ${message.fileName} (${message.type})")
+                deduplicationManager.markSeen(message.id)
+                updateStats()
+            }
+        }
     }
 
     // ─── Internal: Message Processing Pipeline ──────────────────

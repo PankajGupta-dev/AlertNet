@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.sp
 import com.alertnet.app.model.DeliveryStatus
 import com.alertnet.app.model.MeshMessage
 import com.alertnet.app.model.MessageType
+import com.alertnet.app.model.TransferProgress
 import com.alertnet.app.ui.theme.*
 import java.text.SimpleDateFormat
 import java.util.*
@@ -29,14 +30,24 @@ import java.util.*
  * - Delivery status icon (⏳ pending, ✓ sent, ✓✓ delivered, ✕ failed)
  * - Hop count badge for relayed messages
  * - Timestamp
- * - File/image indicator for non-text messages
+ * - Specialized content for IMAGE, VOICE, and FILE messages
  */
 @Composable
 fun MessageBubble(
     message: MeshMessage,
     decryptedText: String,
     isSentByMe: Boolean,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    // Media support parameters
+    mediaFilePath: String? = null,
+    transferProgress: TransferProgress? = null,
+    isPlayingVoice: Boolean = false,
+    isVoicePaused: Boolean = false,
+    voiceProgress: Float = 0f,
+    onPlayVoice: () -> Unit = {},
+    onPauseVoice: () -> Unit = {},
+    onResumeVoice: () -> Unit = {},
+    onSeekVoice: (Float) -> Unit = {}
 ) {
     val alignment = if (isSentByMe) Alignment.CenterEnd else Alignment.CenterStart
     val bubbleShape = if (isSentByMe) {
@@ -65,37 +76,79 @@ fun MessageBubble(
                 .padding(12.dp)
                 .animateContentSize()
         ) {
-            // File/image indicator
-            if (message.type == MessageType.IMAGE || message.type == MessageType.FILE) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = if (message.type == MessageType.IMAGE) {
-                            Icons.Default.Image
-                        } else {
-                            Icons.Default.AttachFile
-                        },
-                        contentDescription = null,
-                        tint = if (isSentByMe) MeshBlueGlow else MeshBlueBright,
-                        modifier = Modifier.size(18.dp)
+            // ─── Content by message type ──────────────────────
+            when (message.type) {
+                MessageType.IMAGE -> {
+                    // Inline image preview
+                    ImagePreviewBubble(
+                        filePath = mediaFilePath,
+                        fileName = message.fileName,
+                        isSentByMe = isSentByMe,
+                        transferProgress = transferProgress
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = message.fileName ?: "Attachment",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (isSentByMe) MeshBlueGlow else MeshBlueBright,
-                        fontWeight = FontWeight.Medium
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+
+                MessageType.VOICE -> {
+                    // Voice message with waveform
+                    VoiceMessageBubble(
+                        messageId = message.id,
+                        durationText = decryptedText,
+                        isPlaying = isPlayingVoice,
+                        isPaused = isVoicePaused,
+                        progress = voiceProgress,
+                        isSentByMe = isSentByMe,
+                        onPlay = onPlayVoice,
+                        onPause = onPauseVoice,
+                        onResume = onResumeVoice,
+                        onSeek = onSeekVoice
                     )
                 }
-                Spacer(modifier = Modifier.height(4.dp))
-            }
 
-            // Message text
-            Text(
-                text = decryptedText,
-                style = MaterialTheme.typography.bodyMedium,
-                color = TextPrimary,
-                lineHeight = 20.sp
-            )
+                MessageType.FILE -> {
+                    // File attachment indicator
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.AttachFile,
+                            contentDescription = null,
+                            tint = if (isSentByMe) MeshBlueGlow else MeshBlueBright,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = message.fileName ?: "Attachment",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (isSentByMe) MeshBlueGlow else MeshBlueBright,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+
+                    // Show transfer progress for files
+                    if (transferProgress != null) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        LinearProgressIndicator(
+                            progress = { transferProgress.progress },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(3.dp)
+                                .clip(RoundedCornerShape(2.dp)),
+                            color = MeshBlue,
+                            trackColor = MeshBlue.copy(alpha = 0.2f)
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                }
+
+                else -> {
+                    // Text messages (TEXT, ACK, etc.)
+                    Text(
+                        text = decryptedText,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextPrimary,
+                        lineHeight = 20.sp
+                    )
+                }
+            }
 
             Spacer(modifier = Modifier.height(6.dp))
 

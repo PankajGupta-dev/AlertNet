@@ -34,7 +34,7 @@ class TransportManager(
     }
 
     private val bleTransport = BleTransport(context, deviceId)
-    private val wifiDirectTransport = WiFiDirectTransport(context, deviceId)
+    internal val wifiDirectTransport = WiFiDirectTransport(context, deviceId)
     private val transports: List<Transport> = listOf(bleTransport, wifiDirectTransport)
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
