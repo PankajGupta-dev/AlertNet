@@ -133,7 +133,26 @@ class VoiceRecorderManager(private val context: Context) {
         _durationMs.value = 0
 
         val file = outputFile
-        Log.d(TAG, "Recording stopped: ${file?.absolutePath} (${file?.length() ?: 0} bytes)")
+
+        // BUG FIX: MediaRecorder.stop() returns before the OS finishes writing
+        // the MPEG-4 container trailer (moov atom). Wait briefly and verify.
+        if (file != null && file.exists()) {
+            // Give the filesystem time to flush the container trailer
+            Thread.sleep(200)
+
+            val size = file.length()
+            if (size <= 0) {
+                Log.e(TAG, "Recording file is empty after stop! Discarding.")
+                file.delete()
+                outputFile = null
+                return null
+            }
+            Log.d(TAG, "Recording stopped: ${file.absolutePath} ($size bytes)")
+        } else {
+            Log.e(TAG, "Recording file not found after stop")
+            return null
+        }
+
         return file
     }
 

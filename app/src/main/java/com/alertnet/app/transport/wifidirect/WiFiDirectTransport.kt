@@ -615,8 +615,9 @@ class WiFiDirectTransport(
         try {
             val socket = Socket()
             socket.connect(InetSocketAddress(targetIP, PORT), 30_000) // 30s timeout for large files
+            socket.sendBufferSize = 131072 // 128KB send buffer for throughput
 
-            val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
+            val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 131072))
 
             // Type byte
             outputStream.writeByte(0x01)
@@ -638,8 +639,22 @@ class WiFiDirectTransport(
             }
 
             outputStream.flush()
-            socket.close()
             fileStream.close()
+
+            // BUG FIX: Verify we sent the exact number of bytes expected
+            if (totalSent != fileSize) {
+                Log.e(TAG, "SEND SIZE MISMATCH: sent=$totalSent expected=$fileSize to $peerId")
+                socket.close()
+                return@withContext false
+            }
+
+            // BUG FIX: Gracefully signal end-of-stream so the receiver's
+            // readFully() doesn't get an abrupt RST. This lets the TCP kernel
+            // drain its send buffer before the socket is torn down.
+            try { socket.shutdownOutput() } catch (_: Exception) {}
+            // Brief wait to let receiver drain
+            Thread.sleep(100)
+            socket.close()
 
             Log.d(TAG, "Binary transfer complete: $totalSent bytes to $peerId")
             true

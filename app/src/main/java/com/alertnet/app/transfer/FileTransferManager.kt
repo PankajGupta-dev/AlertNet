@@ -106,6 +106,24 @@ class FileTransferManager(
             val transferId = UUID.randomUUID().toString()
             val totalChunks = ceil(fileSize.toDouble() / CHUNK_SIZE).toInt()
 
+            // BUG FIX: Save a local copy so the sender can preview their own sent media.
+            // Without this, the sender's image bubble shows "broken image" because
+            // the content URI from the gallery can't be resolved by file path.
+            val localCopy = fileStorage.createFile(fileName)
+            contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(localCopy).use { output ->
+                    input.copyTo(output, CHUNK_SIZE)
+                    output.flush()
+                    output.fd.sync()
+                }
+            } ?: run {
+                Log.e(TAG, "Cannot open file for local copy: $uri")
+                return@withContext null
+            }
+
+            val verifiedSize = localCopy.length()
+            Log.d(TAG, "Local copy created: $fileName ($verifiedSize bytes)")
+
             // Build transfer header
             val header = FileTransferHeader(
                 transferId = transferId,
@@ -114,7 +132,7 @@ class FileTransferManager(
                 targetId = targetId,
                 fileName = fileName,
                 mimeType = mimeType,
-                fileSize = fileSize,
+                fileSize = verifiedSize,
                 chunkSize = CHUNK_SIZE,
                 totalChunks = totalChunks,
                 messageType = type
@@ -138,24 +156,19 @@ class FileTransferManager(
             repository.insertMessage(message)
 
             // Initial progress
-            updateProgress(transferId, messageId, 0, fileSize, TransferState.SENDING)
+            updateProgress(transferId, messageId, 0, verifiedSize, TransferState.SENDING)
 
-            // Stream send via WiFi Direct
+            // Stream send from LOCAL COPY (not URI) so file is stable
             val headerBytes = json.encodeToString(header).toByteArray(Charsets.UTF_8)
-            val inputStream = contentResolver.openInputStream(uri) ?: run {
-                Log.e(TAG, "Cannot open file: $uri")
-                repository.updateStatus(messageId, DeliveryStatus.FAILED)
-                updateProgress(transferId, messageId, 0, fileSize, TransferState.FAILED)
-                return@withContext null
-            }
+            val inputStream = FileInputStream(localCopy)
 
             val success = wifiTransport.sendBinaryTransfer(
                 peerId = targetId,
                 header = headerBytes,
                 fileStream = inputStream,
-                fileSize = fileSize,
+                fileSize = verifiedSize,
                 onProgress = { bytesSent ->
-                    updateProgress(transferId, messageId, bytesSent, fileSize, TransferState.SENDING)
+                    updateProgress(transferId, messageId, bytesSent, verifiedSize, TransferState.SENDING)
                 }
             )
 
@@ -163,12 +176,12 @@ class FileTransferManager(
             val finalStatus = if (success) DeliveryStatus.SENT else DeliveryStatus.FAILED
             repository.updateStatus(messageId, finalStatus)
             updateProgress(
-                transferId, messageId, if (success) fileSize else 0, fileSize,
+                transferId, messageId, if (success) verifiedSize else 0, verifiedSize,
                 if (success) TransferState.COMPLETED else TransferState.FAILED
             )
 
             if (success) {
-                Log.d(TAG, "File sent: $fileName ($fileSize bytes)")
+                Log.d(TAG, "File sent: $fileName ($verifiedSize bytes)")
             } else {
                 Log.e(TAG, "File send failed: $fileName")
             }
@@ -247,6 +260,13 @@ class FileTransferManager(
             val localCopy = fileStorage.createFile(fileName)
             audioFile.copyTo(localCopy, overwrite = true)
 
+            // BUG FIX: Read size from the stable local copy, not the temp file
+            val verifiedSize = localCopy.length()
+            if (verifiedSize != fileSize) {
+                Log.w(TAG, "File size mismatch after copy: expected=$fileSize actual=$verifiedSize")
+            }
+            Log.d(TAG, "Voice file ready for send: $fileName ($verifiedSize bytes)")
+
             val headerBytes = json.encodeToString(header).toByteArray(Charsets.UTF_8)
             val inputStream = FileInputStream(localCopy)
 
@@ -254,21 +274,27 @@ class FileTransferManager(
                 peerId = targetId,
                 header = headerBytes,
                 fileStream = inputStream,
-                fileSize = fileSize,
+                fileSize = verifiedSize,
                 onProgress = { bytesSent ->
-                    updateProgress(transferId, messageId, bytesSent, fileSize, TransferState.SENDING)
+                    Log.v(TAG, "Voice send progress: $bytesSent / $verifiedSize bytes")
+                    updateProgress(transferId, messageId, bytesSent, verifiedSize, TransferState.SENDING)
                 }
             )
 
             val finalStatus = if (success) DeliveryStatus.SENT else DeliveryStatus.FAILED
             repository.updateStatus(messageId, finalStatus)
             updateProgress(
-                transferId, messageId, if (success) fileSize else 0, fileSize,
+                transferId, messageId, if (success) verifiedSize else 0, verifiedSize,
                 if (success) TransferState.COMPLETED else TransferState.FAILED
             )
 
-            // Clean up original temp file
-            audioFile.delete()
+            // BUG FIX: Only delete original temp file on SUCCESS
+            if (success) {
+                audioFile.delete()
+                Log.d(TAG, "Voice sent successfully: $fileName ($verifiedSize bytes)")
+            } else {
+                Log.e(TAG, "Voice send failed, keeping temp file: ${audioFile.absolutePath}")
+            }
 
             message.copy(status = finalStatus)
         } catch (e: Exception) {
@@ -340,9 +366,18 @@ class FileTransferManager(
                     )
                 }
                 fos.flush()
+                fos.fd.sync() // Force OS to flush to physical storage
             }
 
-            Log.d(TAG, "Received: ${header.fileName} ($received bytes)")
+            // BUG FIX: Verify received file size matches header
+            val actualSize = outputFile.length()
+            Log.d(TAG, "Received: ${header.fileName} (stream=$received bytes, disk=$actualSize bytes, expected=${header.fileSize})")
+
+            if (received != header.fileSize || actualSize != header.fileSize) {
+                Log.e(TAG, "FILE SIZE MISMATCH! expected=${header.fileSize} received=$received disk=$actualSize")
+                outputFile.delete()
+                return@withContext null
+            }
 
             // Create message record
             val message = MeshMessage(
