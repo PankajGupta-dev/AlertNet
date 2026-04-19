@@ -1,5 +1,7 @@
 package com.alertnet.app.ui.viewmodel
 
+import android.annotation.SuppressLint
+import android.content.Context
 import android.location.Location
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -7,21 +9,26 @@ import com.alertnet.app.db.DatabaseProvider
 import com.alertnet.app.db.PeerQueries
 import com.alertnet.app.model.MeshPeer
 import com.alertnet.app.repository.SettingsRepository
-import com.alertnet.app.service.LocationForegroundService
+import com.google.android.gms.location.CurrentLocationRequest
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit
 
 /**
  * ViewModel for MeshMapScreen.
  *
  * Provides reactive peer location data and self-location for the offline map.
+ * Uses FusedLocationProviderClient directly — no service binding required.
  * Manages the first-visit location consent dialog flow.
  */
 class MeshMapViewModel(
     private val settingsRepository: SettingsRepository,
-    private val locationService: LocationForegroundService?
+    private val appContext: Context
 ) : ViewModel() {
 
     /** Peers with known GPS coordinates — polled every 5s */
@@ -45,6 +52,8 @@ class MeshMapViewModel(
     /** True on first-ever visit to MeshMapScreen — drives the consent dialog */
     val showConsentDialog: StateFlow<Boolean> = _showConsentDialog.asStateFlow()
 
+    private val cancellationTokenSource = CancellationTokenSource()
+
     init {
         checkConsentState()
         if (settingsRepository.isLocalMapLocationEnabled) {
@@ -65,6 +74,7 @@ class MeshMapViewModel(
             settingsRepository.setMeshLocationBroadcast(true)
             settingsRepository.setHasShownLocationConsent(true)
             _showConsentDialog.value = false
+            fetchSelfLocation()
         }
     }
 
@@ -76,9 +86,36 @@ class MeshMapViewModel(
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun fetchSelfLocation() {
-        locationService?.requestOneShotForShare { location ->
-            _selfLocation.value = location
-        }
+        val fusedClient = LocationServices.getFusedLocationProviderClient(appContext)
+
+        val request = CurrentLocationRequest.Builder()
+            .setPriority(Priority.PRIORITY_BALANCED_POWER_ACCURACY)
+            .setMaxUpdateAgeMillis(TimeUnit.MINUTES.toMillis(2))
+            .setDurationMillis(TimeUnit.SECONDS.toMillis(10))
+            .build()
+
+        fusedClient.getCurrentLocation(request, cancellationTokenSource.token)
+            .addOnSuccessListener { location ->
+                if (location != null) {
+                    _selfLocation.value = location
+                } else {
+                    // Fallback to last known
+                    fusedClient.lastLocation.addOnSuccessListener { last ->
+                        _selfLocation.value = last
+                    }
+                }
+            }
+            .addOnFailureListener {
+                fusedClient.lastLocation.addOnSuccessListener { last ->
+                    _selfLocation.value = last
+                }
+            }
+    }
+
+    override fun onCleared() {
+        cancellationTokenSource.cancel()
+        super.onCleared()
     }
 }

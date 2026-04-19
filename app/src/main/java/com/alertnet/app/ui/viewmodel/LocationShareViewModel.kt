@@ -1,23 +1,28 @@
 package com.alertnet.app.ui.viewmodel
 
+import android.annotation.SuppressLint
+import android.content.Context
 import android.location.Location
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.alertnet.app.model.LocationSharePayload
 import com.alertnet.app.repository.SettingsRepository
-import com.alertnet.app.service.LocationForegroundService
+import com.google.android.gms.location.CurrentLocationRequest
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.flow.*
-import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit
 
 /**
  * ViewModel for LocationShareBottomSheet.
  *
  * Fetches a one-shot GPS location on init (does NOT broadcast to mesh).
- * Exposes the location state for the preview map and send button.
+ * Uses FusedLocationProviderClient directly — no service binding required.
  */
 class LocationShareViewModel(
     private val settingsRepository: SettingsRepository,
-    private val locationService: LocationForegroundService?
+    private val appContext: Context
 ) : ViewModel() {
 
     sealed class LocationState {
@@ -33,30 +38,70 @@ class LocationShareViewModel(
         .observeMeshLocationBroadcast()
         .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
+    private val cancellationTokenSource = CancellationTokenSource()
+
     init {
         fetchLocation()
     }
 
+    @SuppressLint("MissingPermission")
     private fun fetchLocation() {
-        if (locationService == null) {
-            _locationState.value = LocationState.Failed
-            return
-        }
+        val fusedClient = LocationServices.getFusedLocationProviderClient(appContext)
 
-        locationService.requestOneShotForShare { location ->
-            _locationState.value = if (location != null) {
-                LocationState.Ready(
-                    LocationSharePayload(
-                        lat = location.latitude,
-                        lon = location.longitude,
-                        accuracyMeters = location.accuracy,
-                        altitudeMeters = if (location.hasAltitude()) location.altitude.toFloat() else null,
-                        timestampEpochSec = location.time / 1000
+        val request = CurrentLocationRequest.Builder()
+            .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
+            .setMaxUpdateAgeMillis(TimeUnit.MINUTES.toMillis(2))
+            .setDurationMillis(TimeUnit.SECONDS.toMillis(15))
+            .build()
+
+        fusedClient.getCurrentLocation(request, cancellationTokenSource.token)
+            .addOnSuccessListener { location ->
+                if (location != null) {
+                    _locationState.value = LocationState.Ready(
+                        LocationSharePayload(
+                            lat = location.latitude,
+                            lon = location.longitude,
+                            accuracyMeters = location.accuracy,
+                            altitudeMeters = if (location.hasAltitude()) location.altitude.toFloat() else null,
+                            timestampEpochSec = location.time / 1000
+                        )
                     )
-                )
-            } else {
-                LocationState.Failed
+                } else {
+                    // getCurrentLocation returned null — try lastLocation as fallback
+                    fetchLastKnown(fusedClient)
+                }
             }
-        }
+            .addOnFailureListener {
+                // GPS radio failed — try lastLocation as fallback
+                fetchLastKnown(fusedClient)
+            }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun fetchLastKnown(fusedClient: com.google.android.gms.location.FusedLocationProviderClient) {
+        fusedClient.lastLocation
+            .addOnSuccessListener { location ->
+                _locationState.value = if (location != null) {
+                    LocationState.Ready(
+                        LocationSharePayload(
+                            lat = location.latitude,
+                            lon = location.longitude,
+                            accuracyMeters = location.accuracy,
+                            altitudeMeters = if (location.hasAltitude()) location.altitude.toFloat() else null,
+                            timestampEpochSec = location.time / 1000
+                        )
+                    )
+                } else {
+                    LocationState.Failed
+                }
+            }
+            .addOnFailureListener {
+                _locationState.value = LocationState.Failed
+            }
+    }
+
+    override fun onCleared() {
+        cancellationTokenSource.cancel()
+        super.onCleared()
     }
 }
