@@ -7,7 +7,7 @@ import android.database.sqlite.SQLiteOpenHelper
 class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 
     companion object {
-        const val DATABASE_VERSION = 2
+        const val DATABASE_VERSION = 4
         const val DATABASE_NAME = "alertnet.db"
     }
 
@@ -59,7 +59,14 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
                 transportType TEXT NOT NULL,
                 discoveryType TEXT NOT NULL DEFAULT 'BLE',
                 ipAddress TEXT,
-                macAddress TEXT
+                macAddress TEXT,
+                isConnected INTEGER NOT NULL DEFAULT 0,
+                alertnetId TEXT,
+                username TEXT,
+                latitude REAL,
+                longitude REAL,
+                location_accuracy_meters REAL,
+                location_updated_at INTEGER
             )
         """)
         
@@ -69,14 +76,20 @@ class AppDatabaseHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_N
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion < 2) {
+        if (oldVersion < 3) {
             // Peers are transient (5-min staleness), safe to recreate
+            db.execSQL("DROP TABLE IF EXISTS messages")
+            db.execSQL("DROP TABLE IF EXISTS seen_messages")
             db.execSQL("DROP TABLE IF EXISTS peers")
+            onCreate(db)
+            return
         }
-        // Recreate all tables from scratch
-        db.execSQL("DROP TABLE IF EXISTS messages")
-        db.execSQL("DROP TABLE IF EXISTS seen_messages")
-        db.execSQL("DROP TABLE IF EXISTS peers")
-        onCreate(db)
+        if (oldVersion < 4) {
+            // Add location columns to peers — non-destructive ALTER TABLE
+            db.execSQL("ALTER TABLE peers ADD COLUMN latitude REAL")
+            db.execSQL("ALTER TABLE peers ADD COLUMN longitude REAL")
+            db.execSQL("ALTER TABLE peers ADD COLUMN location_accuracy_meters REAL")
+            db.execSQL("ALTER TABLE peers ADD COLUMN location_updated_at INTEGER")
+        }
     }
 }

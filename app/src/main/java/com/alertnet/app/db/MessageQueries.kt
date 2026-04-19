@@ -29,7 +29,7 @@ object MessageQueries {
         db.rawQuery("""
             SELECT * FROM messages 
             WHERE (senderId = ? OR targetId = ?) 
-            AND type IN ('TEXT', 'IMAGE', 'FILE', 'VOICE')
+            AND type IN ('TEXT', 'IMAGE', 'FILE', 'VOICE', 'LOCATION_SHARE')
             ORDER BY timestamp ASC
         """, arrayOf(peerId, peerId)).use { cursor ->
             while (cursor.moveToNext()) {
@@ -45,7 +45,7 @@ object MessageQueries {
             SELECT * FROM messages 
             WHERE status IN ('QUEUED', 'SENT') 
             AND ttl > 0
-            AND type IN ('TEXT', 'IMAGE', 'FILE', 'VOICE', 'ACK')
+            AND type IN ('TEXT', 'IMAGE', 'FILE', 'VOICE', 'ACK', 'LOCATION_PING')
             ORDER BY timestamp ASC
         """, emptyArray()).use { cursor ->
             while (cursor.moveToNext()) {
@@ -73,11 +73,23 @@ object MessageQueries {
     }
 
     fun countDataMessages(db: SQLiteDatabase): Int {
-        db.rawQuery("SELECT COUNT(*) FROM messages WHERE type NOT IN ('ACK', 'PEER_ANNOUNCE', 'PEER_LEAVE')", emptyArray()).use { cursor ->
+        db.rawQuery("SELECT COUNT(*) FROM messages WHERE type NOT IN ('ACK', 'PEER_ANNOUNCE', 'PEER_LEAVE', 'LOCATION_PING')", emptyArray()).use { cursor ->
             if (cursor.moveToFirst()) {
                 return cursor.getInt(0)
             }
         }
         return 0
+    }
+
+    /**
+     * Remove all queued LOCATION_PING messages from a specific sender.
+     * Called before enqueuing a new ping to enforce one-ping-per-sender deduplication.
+     */
+    fun removeQueuedLocationPings(db: SQLiteDatabase, senderId: String) {
+        db.delete(
+            "messages",
+            "type = 'LOCATION_PING' AND senderId = ? AND status IN ('QUEUED', 'SENT')",
+            arrayOf(senderId)
+        )
     }
 }

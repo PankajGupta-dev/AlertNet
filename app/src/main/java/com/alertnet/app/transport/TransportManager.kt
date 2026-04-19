@@ -25,7 +25,8 @@ import kotlinx.coroutines.flow.*
  */
 class TransportManager(
     private val context: Context,
-    private val deviceId: String
+    private val deviceId: String,
+    private val username: String
 ) {
     companion object {
         private const val TAG = "TransportManager"
@@ -33,7 +34,7 @@ class TransportManager(
         private const val RETRY_BASE_DELAY_MS = 1000L
     }
 
-    private val bleTransport = BleTransport(context, deviceId)
+    private val bleTransport = BleTransport(context, deviceId, username)
     internal val wifiDirectTransport = WiFiDirectTransport(context, deviceId)
     private val transports: List<Transport> = listOf(bleTransport, wifiDirectTransport)
 

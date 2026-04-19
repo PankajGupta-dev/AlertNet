@@ -10,6 +10,7 @@ import com.alertnet.app.model.DeliveryStatus
 import com.alertnet.app.model.MeshMessage
 import com.alertnet.app.model.MessageType
 import com.alertnet.app.model.TransferProgress
+import com.alertnet.app.model.LocationSharePayload
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
@@ -185,6 +186,28 @@ class ChatViewModel(
         }
     }
 
+    // ─── Send Location Share ─────────────────────────────────────
+
+    /**
+     * Send a location share message to the current peer.
+     * Does NOT broadcast to mesh — it's a targeted chat message only.
+     */
+    fun sendLocationShare(payload: LocationSharePayload) {
+        val peerId = currentPeerId ?: return
+
+        _sendingState.value = SendingState.Sending
+
+        viewModelScope.launch {
+            try {
+                meshManager.sendLocationShare(peerId, payload)
+                refreshMessages()
+                _sendingState.value = SendingState.Idle
+            } catch (e: Exception) {
+                _sendingState.value = SendingState.Error(e.message ?: "Location send failed")
+            }
+        }
+    }
+
     // ─── Voice Recording ─────────────────────────────────────────
 
     /**
@@ -281,6 +304,7 @@ class ChatViewModel(
             MessageType.ACK -> "✓ Delivered"
             MessageType.IMAGE -> message.fileName ?: "Image"
             MessageType.VOICE -> formatDuration(message)
+            MessageType.LOCATION_SHARE -> "📍 Location"
             else -> message.fileName ?: "File"
         }
     }

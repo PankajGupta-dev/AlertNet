@@ -20,9 +20,13 @@ import com.alertnet.app.model.DeliveryStatus
 import com.alertnet.app.model.MeshMessage
 import com.alertnet.app.model.MessageType
 import com.alertnet.app.model.TransferProgress
+import com.alertnet.app.model.LocationSharePayload
 import com.alertnet.app.ui.theme.*
+import kotlinx.serialization.json.Json
 import java.text.SimpleDateFormat
 import java.util.*
+
+private val bubbleJson = Json { ignoreUnknownKeys = true }
 
 /**
  * Chat bubble component with:
@@ -30,7 +34,7 @@ import java.util.*
  * - Delivery status icon (⏳ pending, ✓ sent, ✓✓ delivered, ✕ failed)
  * - Hop count badge for relayed messages
  * - Timestamp
- * - Specialized content for IMAGE, VOICE, and FILE messages
+ * - Specialized content for IMAGE, VOICE, FILE, and LOCATION_SHARE messages
  */
 @Composable
 fun MessageBubble(
@@ -47,7 +51,8 @@ fun MessageBubble(
     onPlayVoice: () -> Unit = {},
     onPauseVoice: () -> Unit = {},
     onResumeVoice: () -> Unit = {},
-    onSeekVoice: (Float) -> Unit = {}
+    onSeekVoice: (Float) -> Unit = {},
+    onViewOnMap: ((Double, Double) -> Unit)? = null
 ) {
     val alignment = if (isSentByMe) Alignment.CenterEnd else Alignment.CenterStart
     val bubbleShape = if (isSentByMe) {
@@ -137,6 +142,29 @@ fun MessageBubble(
                         )
                     }
                     Spacer(modifier = Modifier.height(4.dp))
+                }
+
+                MessageType.LOCATION_SHARE -> {
+                    // Location share with coordinates and "View on Map" CTA
+                    val locPayload = try {
+                        bubbleJson.decodeFromString<LocationSharePayload>(message.payload)
+                    } catch (_: Exception) { null }
+
+                    if (locPayload != null) {
+                        LocationShareBubble(
+                            payload = locPayload,
+                            isSelf = isSentByMe,
+                            onViewOnMap = { lat, lon ->
+                                onViewOnMap?.invoke(lat, lon)
+                            }
+                        )
+                    } else {
+                        Text(
+                            text = "📍 Location (unavailable)",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextMuted
+                        )
+                    }
                 }
 
                 else -> {

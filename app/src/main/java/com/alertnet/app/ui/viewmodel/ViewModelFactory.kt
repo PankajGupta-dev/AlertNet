@@ -4,13 +4,15 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import com.alertnet.app.AlertNetApplication
 import com.alertnet.app.mesh.MeshManager
+import com.alertnet.app.service.LocationForegroundService
 
 /**
  * Factory for creating ViewModels with the MeshManager dependency.
  * Provides manual dependency injection without Hilt/Dagger.
  */
 class ViewModelFactory(
-    private val app: AlertNetApplication
+    private val app: AlertNetApplication,
+    private val locationService: LocationForegroundService? = null
 ) : ViewModelProvider.Factory {
 
     @Suppress("UNCHECKED_CAST")
@@ -22,7 +24,17 @@ class ViewModelFactory(
             modelClass.isAssignableFrom(PeersViewModel::class.java) -> {
                 PeersViewModel(app.meshManager) as T
             }
+            modelClass.isAssignableFrom(MeshMapViewModel::class.java) -> {
+                MeshMapViewModel(app.settingsRepository, locationService) as T
+            }
+            modelClass.isAssignableFrom(LocationShareViewModel::class.java) -> {
+                LocationShareViewModel(app.settingsRepository, locationService) as T
+            }
+            modelClass.isAssignableFrom(LocationPrivacyViewModel::class.java) -> {
+                LocationPrivacyViewModel(app.settingsRepository) as T
+            }
             else -> throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
         }
     }
 }
+

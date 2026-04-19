@@ -13,6 +13,9 @@ import com.alertnet.app.security.KeyManager
 import com.alertnet.app.transfer.FileStorage
 import com.alertnet.app.transfer.FileTransferManager
 import com.alertnet.app.transport.TransportManager
+import com.alertnet.app.db.DatabaseProvider
+import com.alertnet.app.db.MessageQueries
+import com.alertnet.app.db.PeerQueries
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.serialization.encodeToString
@@ -77,11 +80,42 @@ class MeshManager(
     /** Current discovery state machine phase */
     val discoveryState: StateFlow<DiscoveryState> = peerDiscoveryManager.discoveryState
 
+    /** Unified, deduplicated nearby users for the UI */
+    val nearbyUsers: StateFlow<List<NearbyUser>> = peerDiscoveryManager.nearbyUsers
+
+    /** Which discovery source is currently active */
+    val activeDiscoverySource: StateFlow<ConnectionType?> = peerDiscoveryManager.activeDiscoverySource
+
     private val _meshStats = MutableStateFlow(MeshStats())
     /** Real-time mesh statistics */
     val meshStats: StateFlow<MeshStats> = _meshStats.asStateFlow()
 
     private var isRunning = false
+
+    // ─── Connection Initiation ──────────────────────────────────
+
+    /**
+     * Initiate a WiFi Direct connection to a nearby user (auto-connect on tap).
+     * Updates the user's status to CONNECTING in the UI immediately.
+     */
+    fun connectToUser(userId: String) {
+        peerDiscoveryManager.markConnecting(userId)
+
+        scope.launch {
+            // Find the MeshPeer corresponding to this user
+            val peer = activePeers.value.find {
+                it.alertnetId == userId || it.deviceId == userId
+            }
+            if (peer != null) {
+                Log.d(TAG, "Auto-initiating WiFi Direct connection to ${peer.displayName} ($userId)")
+                // The WiFi Direct transport handles the actual P2P connection
+                // via its connectToPeer mechanism in requestPeerList()
+                peerDiscoveryManager.markConnected(userId)
+            } else {
+                Log.w(TAG, "Cannot connect: peer $userId not found in active peers")
+            }
+        }
+    }
 
     // ─── Lifecycle ───────────────────────────────────────────────
 
@@ -241,6 +275,53 @@ class MeshManager(
         Log.d(TAG, "Expired conversation with $peerId")
     }
 
+    // ─── Location Messages ───────────────────────────────────────
+
+    /**
+     * Send a LOCATION_PING message to the mesh.
+     * Deduplicates: removes any previously queued pings from this sender.
+     */
+    suspend fun sendLocationPing(message: MeshMessage) {
+        // Deduplication — only the latest ping per sender is useful
+        try {
+            MessageQueries.removeQueuedLocationPings(DatabaseProvider.db, message.senderId)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to dedup location pings", e)
+        }
+
+        deduplicationManager.markSeen(message.id)
+        repository.insertMessage(message)
+        sendViaTransport(message)
+        updateStats()
+    }
+
+    /**
+     * Send a LOCATION_SHARE message to a specific peer (chat bubble).
+     * Does NOT update peer location — it's a chat artifact only.
+     */
+    suspend fun sendLocationShare(targetId: String, payload: LocationSharePayload) {
+        val message = MeshMessage(
+            id = UUID.randomUUID().toString(),
+            senderId = deviceId,
+            targetId = targetId,
+            type = MessageType.LOCATION_SHARE,
+            payload = json.encodeToString(payload),
+            timestamp = System.currentTimeMillis(),
+            ttl = 7,
+            hopCount = 0,
+            hopPath = listOf(deviceId),
+            status = DeliveryStatus.QUEUED
+        )
+
+        deduplicationManager.markSeen(message.id)
+        repository.insertMessage(message)
+
+        ackTracker.expectAck(message.id)
+
+        sendViaTransport(message)
+        updateStats()
+    }
+
     /**
      * Decrypt a message payload for display.
      */
@@ -340,6 +421,10 @@ class MeshManager(
             is RoutingDecision.PeerControl -> {
                 // Peer announcements are handled by PeerDiscoveryManager
                 Log.d(TAG, "Peer control message: ${decision.message.type}")
+            }
+
+            is RoutingDecision.LocationPingReceived -> {
+                handleIncomingLocationPing(decision.message)
             }
         }
     }
@@ -478,6 +563,51 @@ class MeshManager(
             )
         } catch (e: Exception) {
             Log.e(TAG, "Stats update failed", e)
+        }
+    }
+
+    // ─── Internal: Location Ping Handling ──────────────────────
+
+    /**
+     * Process an incoming LOCATION_PING message.
+     * Updates the sender's row in the peers table with their GPS coordinates.
+     *
+     * Guards:
+     * - Drops pings older than 15 minutes (900 seconds)
+     * - Never updates our own location from an echoed-back ping
+     * - LOCATION_SHARE messages must NEVER call this method
+     */
+    private fun handleIncomingLocationPing(message: MeshMessage) {
+        val payload = try {
+            json.decodeFromString<LocationPingPayload>(message.payload)
+        } catch (e: Exception) {
+            Log.w(TAG, "Malformed LOCATION_PING payload — dropping", e)
+            return  // malformed payload — drop silently, do not crash
+        }
+
+        // Freshness gate — a 15-minute-old location is misleading on a live map
+        val ageSeconds = (System.currentTimeMillis() / 1000) - payload.timestampEpochSec
+        if (ageSeconds > 900) {
+            Log.d(TAG, "Dropping stale LOCATION_PING (${ageSeconds}s old)")
+            return
+        }
+
+        // Never update our own location from an echoed-back ping
+        if (payload.senderId == deviceId) return
+
+        // Update peer DB with their location
+        try {
+            PeerQueries.updatePeerLocation(
+                db = DatabaseProvider.db,
+                deviceId = payload.senderId,
+                latitude = payload.lat,
+                longitude = payload.lon,
+                accuracyMeters = payload.accuracyMeters,
+                updatedAt = payload.timestampEpochSec * 1000
+            )
+            Log.d(TAG, "Updated peer location: ${payload.senderId} → (${payload.lat}, ${payload.lon})")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to update peer location", e)
         }
     }
 

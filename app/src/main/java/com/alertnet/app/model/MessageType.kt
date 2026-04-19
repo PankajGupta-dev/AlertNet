@@ -20,5 +20,9 @@ enum class MessageType {
     /** Periodic peer presence announcement */
     PEER_ANNOUNCE,
     /** Peer leaving the mesh gracefully */
-    PEER_LEAVE
+    PEER_LEAVE,
+    /** Automatic background location broadcast — feeds the live peer map */
+    LOCATION_PING,
+    /** User-triggered location share — renders as a chat bubble, never updates peer DB */
+    LOCATION_SHARE
 }

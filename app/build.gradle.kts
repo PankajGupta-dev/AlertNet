@@ -70,6 +70,12 @@ dependencies {
     // DataStore
     implementation(libs.androidx.datastore.preferences)
 
+    // Google Play Services Location (GPS)
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+
+    // MapLibre (offline maps)
+    implementation("org.maplibre.gl:android-sdk:10.3.0")
+
     // Legacy (kept for transition)
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")

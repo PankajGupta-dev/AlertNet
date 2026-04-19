@@ -23,19 +23,25 @@ import java.util.concurrent.ConcurrentHashMap
  * BLE transport implementation for AlertNet mesh.
  *
  * Responsibilities:
- * - Advertise this device's mesh presence via GATT server
+ * - Advertise this device's AlertNet identity via GATT server
+ *   (service data contains 8-char UUID prefix, IDENTITY_CHARACTERISTIC
+ *    returns full "ALERTNET:<uuid>:<username>" on read)
  * - Scan for nearby AlertNet peers via BLE scanning
+ * - Filter out non-AlertNet devices: only peers that broadcast our
+ *   MESH_SERVICE_UUID are candidates, and only those whose GATT
+ *   IDENTITY_CHARACTERISTIC returns a valid ALERTNET payload are shown
  * - Exchange small messages (<500 bytes) via GATT characteristics
  * - For larger payloads, the TransportManager will prefer WiFi Direct
  *
  * Battery optimization:
- * - Duty-cycled scanning: 15s scan / 45s idle
+ * - Duty-cycled scanning: controlled externally by PeerDiscoveryManager
  * - Low-power scan mode
  * - Advertising uses low-latency mode only when actively sending
  */
 class BleTransport(
     private val context: Context,
-    private val deviceId: String
+    private val deviceId: String,
+    private val username: String
 ) : Transport {
 
     companion object {
@@ -62,6 +68,16 @@ class BleTransport(
     private var gattServer: BluetoothGattServer? = null
     private var isRunning = false
     private var scanJob: Job? = null
+
+    /**
+     * Tracks MAC addresses for which a GATT identity read is already in-flight,
+     * preventing duplicate connections to the same device during a scan window.
+     */
+    private val pendingIdentityReads = ConcurrentHashMap.newKeySet<String>()
+
+    /** The full AlertNet identity string served via GATT */
+    private val identityPayload: String
+        get() = "${BleConstants.IDENTITY_PREFIX}:$deviceId:$username"
 
     // ─── Lifecycle ───────────────────────────────────────────────
 
@@ -96,7 +112,7 @@ class BleTransport(
         // Scanning is now controlled externally by PeerDiscoveryManager
         // via startDiscovery() / stopDiscovery()
 
-        Log.d(TAG, "BLE transport started")
+        Log.d(TAG, "BLE transport started (identity: $identityPayload)")
     }
 
     override suspend fun stop() {
@@ -106,11 +122,12 @@ class BleTransport(
         stopGattServer()
         scope.coroutineContext.cancelChildren()
         peersMap.clear()
+        pendingIdentityReads.clear()
         _discoveredPeers.value = emptyList()
         Log.d(TAG, "BLE transport stopped")
     }
 
-    // ─── GATT Server (receive messages) ─────────────────────────
+    // ─── GATT Server (receive messages + serve identity) ─────────
 
     @SuppressLint("MissingPermission")
     private fun startGattServer() {
@@ -209,15 +226,32 @@ class BleTransport(
                 offset: Int,
                 characteristic: BluetoothGattCharacteristic
             ) {
-                if (characteristic.uuid == BleConstants.MESH_ID_CHARACTERISTIC) {
-                    gattServer?.sendResponse(
-                        device, requestId, BluetoothGatt.GATT_SUCCESS,
-                        0, deviceId.toByteArray(Charsets.UTF_8)
-                    )
-                } else {
-                    gattServer?.sendResponse(
-                        device, requestId, BluetoothGatt.GATT_FAILURE, 0, null
-                    )
+                when (characteristic.uuid) {
+                    BleConstants.MESH_ID_CHARACTERISTIC -> {
+                        gattServer?.sendResponse(
+                            device, requestId, BluetoothGatt.GATT_SUCCESS,
+                            0, deviceId.toByteArray(Charsets.UTF_8)
+                        )
+                    }
+                    BleConstants.IDENTITY_CHARACTERISTIC -> {
+                        // Serve full AlertNet identity: "ALERTNET:<uuid>:<username>"
+                        val payload = identityPayload.toByteArray(Charsets.UTF_8)
+                        // Handle offset reads for large payloads
+                        val chunk = if (offset < payload.size) {
+                            payload.copyOfRange(offset, payload.size)
+                        } else {
+                            byteArrayOf()
+                        }
+                        gattServer?.sendResponse(
+                            device, requestId, BluetoothGatt.GATT_SUCCESS, offset, chunk
+                        )
+                        Log.d(TAG, "Served identity to ${device.address}: $identityPayload")
+                    }
+                    else -> {
+                        gattServer?.sendResponse(
+                            device, requestId, BluetoothGatt.GATT_FAILURE, 0, null
+                        )
+                    }
                 }
             }
         })
@@ -240,11 +274,18 @@ class BleTransport(
             BluetoothGattCharacteristic.PERMISSION_WRITE
         )
 
+        val identityChar = BluetoothGattCharacteristic(
+            BleConstants.IDENTITY_CHARACTERISTIC,
+            BluetoothGattCharacteristic.PROPERTY_READ,
+            BluetoothGattCharacteristic.PERMISSION_READ
+        )
+
         service.addCharacteristic(meshIdChar)
         service.addCharacteristic(messageChar)
+        service.addCharacteristic(identityChar)
         gattServer?.addService(service)
 
-        Log.d(TAG, "GATT server started")
+        Log.d(TAG, "GATT server started with identity characteristic")
     }
 
     @SuppressLint("MissingPermission")
@@ -266,13 +307,18 @@ class BleTransport(
             .setConnectable(true)
             .build()
 
+        // Include service UUID + short device ID prefix as service data
+        // so scanners can pre-filter before doing a full GATT read
+        val idPrefix = deviceId.take(8).toByteArray(Charsets.UTF_8)
+
         val data = AdvertiseData.Builder()
             .setIncludeDeviceName(false) // save space
             .addServiceUuid(ParcelUuid(BleConstants.MESH_SERVICE_UUID))
+            .addServiceData(ParcelUuid(BleConstants.MESH_SERVICE_UUID), idPrefix)
             .build()
 
         bleAdvertiser?.startAdvertising(settings, data, advertiseCallback)
-        Log.d(TAG, "BLE advertising started")
+        Log.d(TAG, "BLE advertising started with ID prefix: ${deviceId.take(8)}")
     }
 
     @SuppressLint("MissingPermission")
@@ -349,39 +395,184 @@ class BleTransport(
         }
     }
 
+    /**
+     * BLE scan callback that implements AlertNet identity filtering.
+     *
+     * Two-phase discovery:
+     * 1. Scan result arrives with our MESH_SERVICE_UUID → candidate found
+     * 2. Initiate GATT connect to read IDENTITY_CHARACTERISTIC
+     * 3. Parse "ALERTNET:<uuid>:<username>" → only then add to peers list
+     *
+     * Non-AlertNet devices (headphones, watches, etc.) never pass phase 1
+     * because they don't advertise our custom service UUID.
+     * Devices that advertise our UUID but fail the GATT identity read
+     * are silently ignored.
+     */
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device ?: return
             val address = device.address ?: return
 
-            @SuppressLint("MissingPermission")
-            val name = device.name ?: "BLE-${address.takeLast(5)}"
-
-            val peer = MeshPeer(
-                deviceId = address,
-                displayName = name,
-                lastSeen = System.currentTimeMillis(),
-                rssi = result.rssi,
-                transportType = TransportType.BLE,
-                macAddress = address,
-                isConnected = false
+            // Check for service data — if present, extract the ID prefix
+            val serviceData = result.scanRecord?.getServiceData(
+                ParcelUuid(BleConstants.MESH_SERVICE_UUID)
             )
 
-            val existing = peersMap[address]
-            if (existing == null || System.currentTimeMillis() - existing.lastSeen > 5000) {
-                peersMap[address] = peer
-                scope.launch {
-                    updatePeersList()
-                    if (existing == null) {
-                        _connectionEvents.emit(ConnectionEvent.PeerConnected(peer))
-                    }
-                }
+            if (serviceData != null) {
+                val idPrefix = String(serviceData, Charsets.UTF_8)
+                Log.d(TAG, "AlertNet candidate: $address (prefix: $idPrefix, RSSI: ${result.rssi})")
+            }
+
+            // Check if we already know this peer's AlertNet identity
+            val existingByMac = peersMap.values.find { it.macAddress == address }
+            if (existingByMac?.alertnetId != null) {
+                // Already identified — just update RSSI and lastSeen
+                val key = existingByMac.alertnetId!!
+                peersMap[key] = existingByMac.copy(
+                    rssi = result.rssi,
+                    lastSeen = System.currentTimeMillis()
+                )
+                scope.launch { updatePeersList() }
+                return
+            }
+
+            // Avoid duplicate GATT reads for the same MAC
+            if (!pendingIdentityReads.add(address)) {
+                return
+            }
+
+            // Phase 2: GATT connect to read full identity
+            scope.launch {
+                readAlertNetIdentity(device, result.rssi)
             }
         }
 
         override fun onScanFailed(errorCode: Int) {
             Log.e(TAG, "BLE scan failed: $errorCode")
         }
+    }
+
+    /**
+     * Connect to a BLE device via GATT and read its IDENTITY_CHARACTERISTIC
+     * to get the full "ALERTNET:<uuid>:<username>" payload.
+     *
+     * Only adds the device to the peers list if the identity is valid.
+     */
+    @SuppressLint("MissingPermission")
+    private suspend fun readAlertNetIdentity(device: BluetoothDevice, rssi: Int) {
+        val address = device.address ?: return
+
+        try {
+            val result = CompletableDeferred<MeshPeer?>()
+
+            @SuppressLint("MissingPermission")
+            val gatt = device.connectGatt(context, false, object : BluetoothGattCallback() {
+                @SuppressLint("MissingPermission")
+                override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                    if (newState == BluetoothProfile.STATE_CONNECTED) {
+                        gatt.discoverServices()
+                    } else {
+                        if (!result.isCompleted) result.complete(null)
+                        gatt.close()
+                    }
+                }
+
+                @SuppressLint("MissingPermission")
+                override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        if (!result.isCompleted) result.complete(null)
+                        gatt.close()
+                        return
+                    }
+
+                    val service = gatt.getService(BleConstants.MESH_SERVICE_UUID)
+                    val identityChar = service?.getCharacteristic(BleConstants.IDENTITY_CHARACTERISTIC)
+
+                    if (identityChar == null) {
+                        Log.w(TAG, "No identity characteristic on $address — not an AlertNet device")
+                        if (!result.isCompleted) result.complete(null)
+                        gatt.close()
+                        return
+                    }
+
+                    val readOk = gatt.readCharacteristic(identityChar)
+                    if (!readOk) {
+                        if (!result.isCompleted) result.complete(null)
+                        gatt.close()
+                    }
+                }
+
+                @SuppressLint("MissingPermission")
+                override fun onCharacteristicRead(
+                    gatt: BluetoothGatt,
+                    characteristic: BluetoothGattCharacteristic,
+                    status: Int
+                ) {
+                    gatt.close()
+
+                    if (status != BluetoothGatt.GATT_SUCCESS || characteristic.value == null) {
+                        if (!result.isCompleted) result.complete(null)
+                        return
+                    }
+
+
+                    val identity = String(characteristic.value, Charsets.UTF_8)
+                    val parsed = parseAlertNetIdentity(identity)
+
+                    if (parsed == null) {
+                        Log.w(TAG, "Invalid identity from $address: $identity")
+                        if (!result.isCompleted) result.complete(null)
+                        return
+                    }
+
+                    val peer = MeshPeer(
+                        deviceId = parsed.first,  // AlertNet UUID
+                        displayName = parsed.second,  // Username
+                        lastSeen = System.currentTimeMillis(),
+                        rssi = rssi,
+                        transportType = TransportType.BLE,
+                        discoveryType = TransportType.BLE,
+                        macAddress = address,
+                        isConnected = false,
+                        alertnetId = parsed.first,
+                        username = parsed.second
+                    )
+
+                    Log.d(TAG, "AlertNet peer identified: ${parsed.second} (${parsed.first}) at $address")
+                    if (!result.isCompleted) result.complete(peer)
+                }
+            })
+
+            // Wait with timeout
+            val peer = withTimeoutOrNull(BleConstants.IDENTITY_SCAN_TIMEOUT_MS) {
+                result.await()
+            }
+
+            if (peer != null) {
+                // Store under AlertNet ID (not MAC) for deduplication
+                peersMap[peer.alertnetId!!] = peer
+                updatePeersList()
+                _connectionEvents.emit(ConnectionEvent.PeerConnected(peer))
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "GATT identity read failed for $address", e)
+        } finally {
+            pendingIdentityReads.remove(address)
+        }
+    }
+
+    /**
+     * Parse an AlertNet identity string: "ALERTNET:<uuid>:<username>"
+     * @return Pair(uuid, username) or null if format is invalid
+     */
+    private fun parseAlertNetIdentity(identity: String): Pair<String, String>? {
+        if (!identity.startsWith(BleConstants.IDENTITY_PREFIX + ":")) return null
+        val parts = identity.split(":", limit = 3)
+        if (parts.size < 3) return null
+        val uuid = parts[1]
+        val name = parts[2]
+        if (uuid.isBlank() || name.isBlank()) return null
+        return Pair(uuid, name)
     }
 
     // ─── Send Message ───────────────────────────────────────────
@@ -499,7 +690,7 @@ class BleTransport(
 
     private fun updatePeersList() {
         _discoveredPeers.value = peersMap.values
-            .distinctBy { it.macAddress ?: it.deviceId }
+            .distinctBy { it.alertnetId ?: it.macAddress ?: it.deviceId }
             .toList()
     }
 

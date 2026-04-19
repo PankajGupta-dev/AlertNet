@@ -6,6 +6,7 @@ import android.util.Log
 import com.alertnet.app.db.DatabaseProvider
 import com.alertnet.app.mesh.MeshManager
 import com.alertnet.app.repository.MessageRepository
+import com.alertnet.app.repository.SettingsRepository
 import com.alertnet.app.transport.TransportManager
 import java.util.UUID
 
@@ -43,6 +44,9 @@ class AlertNetApplication : Application() {
     lateinit var meshManager: MeshManager
         private set
 
+    lateinit var settingsRepository: SettingsRepository
+        private set
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -55,9 +59,10 @@ class AlertNetApplication : Application() {
         Log.d(TAG, "Device ID: $deviceId")
 
         // Initialize core components
-        transportManager = TransportManager(this, deviceId)
+        transportManager = TransportManager(this, deviceId, getDeviceName())
         messageRepository = MessageRepository()
         meshManager = MeshManager(this, deviceId, transportManager, messageRepository)
+        settingsRepository = SettingsRepository(this, deviceId)
 
         Log.d(TAG, "AlertNet initialized")
     }

@@ -30,10 +30,13 @@ import androidx.compose.ui.unit.sp
 import com.alertnet.app.media.PlayerState
 import com.alertnet.app.media.RecorderState
 import com.alertnet.app.model.MessageType
+import com.alertnet.app.model.LocationSharePayload
+import com.alertnet.app.ui.components.LocationShareBottomSheet
 import com.alertnet.app.ui.components.MessageBubble
 import com.alertnet.app.ui.components.formatVoiceDuration
 import com.alertnet.app.ui.theme.*
 import com.alertnet.app.ui.viewmodel.ChatViewModel
+import com.alertnet.app.ui.viewmodel.LocationShareViewModel
 import com.alertnet.app.ui.viewmodel.SendingState
 
 /**
@@ -45,9 +48,12 @@ fun ChatScreen(
     peerId: String,
     peerName: String,
     viewModel: ChatViewModel,
-    onBack: () -> Unit
+    locationShareViewModel: LocationShareViewModel? = null,
+    onBack: () -> Unit,
+    onViewOnMap: ((Double, Double) -> Unit)? = null
 ) {
     var messageText by remember { mutableStateOf("") }
+    var showLocationSheet by remember { mutableStateOf(false) }
     val messages by viewModel.messages.collectAsState()
     val sendingState by viewModel.sendingState.collectAsState()
     val listState = rememberLazyListState()
@@ -201,7 +207,8 @@ fun ChatScreen(
                                 onPickImage = { imagePicker.launch("image/*") },
                                 onStartRecording = {
                                     audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                }
+                                },
+                                onShareLocation = { showLocationSheet = true }
                             )
                         }
                     }
@@ -258,7 +265,7 @@ fun ChatScreen(
                     val voiceProg = if (playingMessageId == message.id) playbackProgress else 0f
                     val transferProg = activeTransfers.values.find { it.messageId == message.id }
 
-                    MessageBubble(
+                     MessageBubble(
                         message = message,
                         decryptedText = viewModel.decryptPayload(message),
                         isSentByMe = isSentByMe,
@@ -274,7 +281,8 @@ fun ChatScreen(
                         onPlayVoice = { viewModel.playVoiceMessage(message) },
                         onPauseVoice = { viewModel.pauseVoicePlayback() },
                         onResumeVoice = { viewModel.resumeVoicePlayback() },
-                        onSeekVoice = { viewModel.seekVoicePlayback(it) }
+                        onSeekVoice = { viewModel.seekVoicePlayback(it) },
+                        onViewOnMap = onViewOnMap
                     )
                 }
             }
@@ -291,6 +299,18 @@ fun ChatScreen(
             }
         }
     }
+
+    // Location share bottom sheet
+    if (showLocationSheet && locationShareViewModel != null) {
+        LocationShareBottomSheet(
+            onConfirm = { payload ->
+                viewModel.sendLocationShare(payload)
+                showLocationSheet = false
+            },
+            onDismiss = { showLocationSheet = false },
+            viewModel = locationShareViewModel
+        )
+    }
 }
 
 // ─── Normal Input Bar ────────────────────────────────────────────
@@ -302,7 +322,8 @@ private fun NormalInputBar(
     sendingState: SendingState,
     onSendText: () -> Unit,
     onPickImage: () -> Unit,
-    onStartRecording: () -> Unit
+    onStartRecording: () -> Unit,
+    onShareLocation: () -> Unit = {}
 ) {
     Row(
         modifier = Modifier
@@ -323,6 +344,17 @@ private fun NormalInputBar(
             )
         }
 
+        // Location share button
+        IconButton(
+            onClick = onShareLocation,
+            modifier = Modifier.size(40.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.LocationOn,
+                contentDescription = "Share location",
+                tint = TextSecondary
+            )
+        }
         // Text field
         OutlinedTextField(
             value = messageText,

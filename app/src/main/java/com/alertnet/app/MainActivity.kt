@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+import com.alertnet.app.service.LocationForegroundService
 import com.alertnet.app.service.MeshForegroundService
 import com.alertnet.app.ui.navigation.NavGraph
 import com.alertnet.app.ui.theme.AlertNetTheme
@@ -24,6 +26,7 @@ import com.alertnet.app.ui.theme.MeshNavy
  * Handles:
  * - Runtime permission requests (BLE, WiFi Direct, Location, Notifications)
  * - Starting the MeshForegroundService
+ * - Starting the LocationForegroundService (when user has opted in)
  * - Hosting the Compose NavGraph
  */
 class MainActivity : ComponentActivity() {
@@ -39,6 +42,7 @@ class MainActivity : ComponentActivity() {
         if (allGranted) {
             Log.d(TAG, "All permissions granted")
             startMeshService()
+            startLocationServiceIfEnabled()
         } else {
             val denied = permissions.filter { !it.value }.keys
             Log.w(TAG, "Permissions denied: $denied")
@@ -49,6 +53,10 @@ class MainActivity : ComponentActivity() {
             ).show()
             // Start anyway — transports will handle missing permissions gracefully
             startMeshService()
+            // Only start location if the specific location permission was granted
+            if (hasLocationPermission()) {
+                startLocationServiceIfEnabled()
+            }
         }
     }
 
@@ -98,6 +106,7 @@ class MainActivity : ComponentActivity() {
             permissionLauncher.launch(needed.toTypedArray())
         } else {
             startMeshService()
+            startLocationServiceIfEnabled()
         }
     }
 
@@ -105,10 +114,43 @@ class MainActivity : ComponentActivity() {
         MeshForegroundService.start(this)
     }
 
+    /**
+     * Start LocationForegroundService only when BOTH conditions are met:
+     * 1. ACCESS_FINE_LOCATION permission is granted
+     * 2. User has opted in to mesh location broadcasting via SettingsRepository
+     *
+     * Called on app launch after permissions are resolved.
+     * Also triggered reactively when the user toggles broadcasting ON
+     * in LocationPrivacySettingsScreen.
+     */
+    private fun startLocationServiceIfEnabled() {
+        val app = application as AlertNetApplication
+
+        if (!hasLocationPermission()) {
+            Log.d(TAG, "Location permission not granted — skipping location service")
+            return
+        }
+
+        if (app.settingsRepository.isMeshLocationBroadcastEnabled) {
+            Log.d(TAG, "Starting LocationForegroundService (broadcast enabled)")
+            LocationForegroundService.start(this)
+        } else {
+            Log.d(TAG, "Location broadcast disabled — not starting location service")
+        }
+    }
+
+    private fun hasLocationPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         if (isFinishing) {
             MeshForegroundService.stop(this)
+            LocationForegroundService.stop(this)
         }
     }
 }

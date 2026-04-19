@@ -67,6 +67,13 @@ fun MeshPeer.toContentValues(): ContentValues {
         put("discoveryType", discoveryType.name)
         put("ipAddress", ipAddress)
         put("macAddress", macAddress)
+        put("isConnected", if (isConnected) 1 else 0)
+        put("alertnetId", alertnetId)
+        put("username", username)
+        if (latitude != null) put("latitude", latitude) else putNull("latitude")
+        if (longitude != null) put("longitude", longitude) else putNull("longitude")
+        if (locationAccuracyMeters != null) put("location_accuracy_meters", locationAccuracyMeters) else putNull("location_accuracy_meters")
+        if (locationUpdatedAt != null) put("location_updated_at", locationUpdatedAt) else putNull("location_updated_at")
     }
 }
 
@@ -81,6 +88,13 @@ fun Cursor.toMeshPeer(): MeshPeer {
         transportType = try { TransportType.valueOf(tTypeStr) } catch(e: Exception) { TransportType.WIFI_DIRECT },
         discoveryType = try { TransportType.valueOf(dTypeStr) } catch(e: Exception) { TransportType.BLE },
         ipAddress = getString(getColumnIndexOrThrow("ipAddress")),
-        macAddress = getString(getColumnIndexOrThrow("macAddress"))
+        macAddress = getString(getColumnIndexOrThrow("macAddress")),
+        isConnected = getInt(getColumnIndexOrThrow("isConnected")) == 1,
+        alertnetId = getString(getColumnIndexOrThrow("alertnetId")),
+        username = getString(getColumnIndexOrThrow("username")),
+        latitude = if (isNull(getColumnIndexOrThrow("latitude"))) null else getDouble(getColumnIndexOrThrow("latitude")),
+        longitude = if (isNull(getColumnIndexOrThrow("longitude"))) null else getDouble(getColumnIndexOrThrow("longitude")),
+        locationAccuracyMeters = if (isNull(getColumnIndexOrThrow("location_accuracy_meters"))) null else getFloat(getColumnIndexOrThrow("location_accuracy_meters")),
+        locationUpdatedAt = if (isNull(getColumnIndexOrThrow("location_updated_at"))) null else getLong(getColumnIndexOrThrow("location_updated_at"))
     )
 }

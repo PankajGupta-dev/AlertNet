@@ -79,6 +79,21 @@ class MessageRouter(
             return RoutingDecision.PeerControl(message)
         }
 
+        // 4b. Handle LOCATION_PING — deliver to location handler + forward
+        if (message.type == MessageType.LOCATION_PING) {
+            // Always process the ping locally (updates peer DB)
+            // Then forward if TTL permits (broadcast message with null targetId)
+            if (message.ttl <= 1) {
+                return RoutingDecision.LocationPingReceived(message)
+            }
+            val forwarded = prepareForForward(message)
+            val targets = selectForwardingPeers(forwarded, activePeers)
+            // We still want to process it locally, but the caller handles forwarding
+            // via DeliverAndForward. We use a dedicated decision so MeshManager
+            // can call handleIncomingLocationPing without inserting into chat.
+            return RoutingDecision.LocationPingReceived(message)
+        }
+
         // 5. Message addressed to this device
         if (message.targetId == deviceId) {
             Log.d(TAG, "DELIVER to self: ${message.id}")
@@ -204,4 +219,7 @@ sealed class RoutingDecision {
 
     /** Peer control message (announce/leave) */
     data class PeerControl(val message: MeshMessage) : RoutingDecision()
+
+    /** LOCATION_PING received — process for peer location update, then optionally forward */
+    data class LocationPingReceived(val message: MeshMessage) : RoutingDecision()
 }

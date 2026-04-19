@@ -80,3 +80,6 @@ obj/
 secrets.properties
 local.defaults.properties
 crashlytics.properties
+
+# Large offline map tiles
+*.mbtiles

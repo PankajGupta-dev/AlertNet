@@ -26,5 +26,17 @@ data class MeshPeer(
     val discoveryType: TransportType = TransportType.BLE,
     val ipAddress: String? = null,
     val macAddress: String? = null,
-    val isConnected: Boolean = false
+    val isConnected: Boolean = false,
+    /** AlertNet UUID parsed from BLE ALERTNET:<uuid>:<username> payload */
+    val alertnetId: String? = null,
+    /** Human-readable username parsed from BLE identity payload */
+    val username: String? = null,
+    /** Peer's last known latitude (set only by LOCATION_PING, never LOCATION_SHARE) */
+    val latitude: Double? = null,
+    /** Peer's last known longitude (set only by LOCATION_PING, never LOCATION_SHARE) */
+    val longitude: Double? = null,
+    /** GPS accuracy of the peer's last known location in meters */
+    val locationAccuracyMeters: Float? = null,
+    /** Epoch millis when the peer's location was last updated */
+    val locationUpdatedAt: Long? = null
 )

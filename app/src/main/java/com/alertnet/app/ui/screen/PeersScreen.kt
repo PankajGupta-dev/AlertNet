@@ -1,20 +1,29 @@
 package com.alertnet.app.ui.screen
 
 import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Radar
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.Wifi
+import androidx.compose.material.icons.filled.People
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -22,24 +31,38 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.alertnet.app.mesh.DiscoveryState
 import com.alertnet.app.mesh.MeshStats
-import com.alertnet.app.model.MeshPeer
+import com.alertnet.app.model.ConnectionType
+import com.alertnet.app.model.NearbyUser
+import com.alertnet.app.model.UserStatus
 import com.alertnet.app.ui.components.MeshStatusBar
-import com.alertnet.app.ui.components.PeerCard
+import com.alertnet.app.ui.components.UserCard
 import com.alertnet.app.ui.theme.*
 
 /**
- * Main screen showing discovered mesh peers and network status.
+ * Main screen showing discovered nearby users and network status.
+ *
+ * Layout:
+ * 1. Top bar: "AlertNet" with hub icon
+ * 2. Mesh status bar (peers, messages, etc.)
+ * 3. Discovery state banner (animated)
+ * 4. Section: "Connected" (if any)
+ * 5. Section: "Nearby Users"
+ * 6. Empty state when no users found
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PeersScreen(
-    peers: List<MeshPeer>,
+    connectedUsers: List<NearbyUser>,
+    nearbyUsers: List<NearbyUser>,
     meshStats: MeshStats,
     isDiscovering: Boolean,
     discoveryState: DiscoveryState,
-    onPeerClick: (MeshPeer) -> Unit,
+    activeSource: ConnectionType?,
+    onUserClick: (NearbyUser) -> Unit,
     onRefresh: () -> Unit,
-    onStatsClick: () -> Unit
+    onStatsClick: () -> Unit,
+    onMapClick: () -> Unit = {},
+    onLocationSettingsClick: () -> Unit = {}
 ) {
     Scaffold(
         containerColor = MeshNavy,
@@ -63,6 +86,20 @@ fun PeersScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = onMapClick) {
+                        Icon(
+                            imageVector = Icons.Default.Map,
+                            contentDescription = "Mesh Map",
+                            tint = TextSecondary
+                        )
+                    }
+                    IconButton(onClick = onLocationSettingsClick) {
+                        Icon(
+                            imageVector = Icons.Default.LocationOn,
+                            contentDescription = "Location Settings",
+                            tint = TextSecondary
+                        )
+                    }
                     IconButton(onClick = onStatsClick) {
                         Icon(
                             imageVector = Icons.Default.Analytics,
@@ -85,77 +122,78 @@ fun PeersScreen(
             // Mesh status bar
             MeshStatusBar(stats = meshStats)
 
-            // Discovery state indicator
-            AnimatedVisibility(
-                visible = discoveryState != DiscoveryState.IDLE,
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically()
-            ) {
-                val (stateText, stateColor) = when (discoveryState) {
-                    DiscoveryState.SCANNING_BLE -> "Scanning BLE…" to BleBadge
-                    DiscoveryState.BLE_FOUND -> "Peers found via BLE" to MeshGreen
-                    DiscoveryState.FALLBACK_WIFI_SCAN -> "Falling back to WiFi Direct…" to WiFiBadge
-                    DiscoveryState.WIFI_FOUND -> "Peers found via WiFi" to MeshGreen
-                    DiscoveryState.IDLE -> "" to TextMuted
-                }
-                if (stateText.isNotEmpty()) {
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp),
-                        shape = RoundedCornerShape(8.dp),
-                        color = stateColor.copy(alpha = 0.12f)
-                    ) {
-                        Text(
-                            text = stateText,
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = stateColor
-                        )
-                    }
-                }
-            }
+            // Discovery state banner
+            DiscoveryBanner(
+                discoveryState = discoveryState,
+                activeSource = activeSource,
+                totalFound = connectedUsers.size + nearbyUsers.size
+            )
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Peer list with pull-to-refresh
+            // User list with pull-to-refresh
             PullToRefreshBox(
                 isRefreshing = isDiscovering,
                 onRefresh = onRefresh,
                 modifier = Modifier.fillMaxSize()
             ) {
-                if (peers.isEmpty()) {
-                    // Empty state
-                    EmptyPeersState()
+                if (connectedUsers.isEmpty() && nearbyUsers.isEmpty()) {
+                    EmptyUsersState(discoveryState)
                 } else {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        item {
-                            Text(
-                                text = "Nearby Devices (${peers.size})",
-                                style = MaterialTheme.typography.titleSmall,
-                                color = TextSecondary,
-                                modifier = Modifier.padding(
-                                    start = 4.dp,
-                                    bottom = 4.dp
+                        // ── Connected Section ──
+                        if (connectedUsers.isNotEmpty()) {
+                            item(key = "connected_header") {
+                                SectionHeader(
+                                    title = "Connected",
+                                    count = connectedUsers.size,
+                                    icon = Icons.Default.Link,
+                                    color = MeshGreen
                                 )
-                            )
+                            }
+
+                            items(
+                                items = connectedUsers,
+                                key = { "connected_${it.id}" }
+                            ) { user ->
+                                UserCard(
+                                    user = user,
+                                    onClick = { onUserClick(user) }
+                                )
+                            }
+
+                            item(key = "connected_spacer") {
+                                Spacer(modifier = Modifier.height(8.dp))
+                            }
                         }
 
-                        items(
-                            items = peers,
-                            key = { it.deviceId }
-                        ) { peer ->
-                            PeerCard(
-                                peer = peer,
-                                onClick = { onPeerClick(peer) }
-                            )
+                        // ── Nearby Users Section ──
+                        if (nearbyUsers.isNotEmpty()) {
+                            item(key = "nearby_header") {
+                                SectionHeader(
+                                    title = "Nearby Users",
+                                    count = nearbyUsers.size,
+                                    icon = Icons.Default.People,
+                                    color = MeshBlue
+                                )
+                            }
+
+                            items(
+                                items = nearbyUsers,
+                                key = { "nearby_${it.id}" }
+                            ) { user ->
+                                UserCard(
+                                    user = user,
+                                    onClick = { onUserClick(user) }
+                                )
+                            }
                         }
 
-                        item {
+                        item(key = "bottom_spacer") {
                             Spacer(modifier = Modifier.height(80.dp))
                         }
                     }
@@ -165,8 +203,143 @@ fun PeersScreen(
     }
 }
 
+/**
+ * Section header with icon, title, and count badge.
+ */
 @Composable
-private fun EmptyPeersState() {
+private fun SectionHeader(
+    title: String,
+    count: Int,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    color: androidx.compose.ui.graphics.Color
+) {
+    Row(
+        modifier = Modifier.padding(start = 4.dp, bottom = 4.dp, top = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = color,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleSmall,
+            color = color,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Surface(
+            shape = CircleShape,
+            color = color.copy(alpha = 0.15f)
+        ) {
+            Text(
+                text = "$count",
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = color,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+/**
+ * Animated discovery state banner with contextual messages.
+ */
+@Composable
+private fun DiscoveryBanner(
+    discoveryState: DiscoveryState,
+    activeSource: ConnectionType?,
+    totalFound: Int
+) {
+    AnimatedVisibility(
+        visible = discoveryState != DiscoveryState.IDLE,
+        enter = fadeIn() + expandVertically(),
+        exit = fadeOut() + shrinkVertically()
+    ) {
+        val (stateText, stateColor, stateIcon) = when (discoveryState) {
+            DiscoveryState.SCANNING_WIFI,
+            DiscoveryState.SCANNING_BLE,
+            DiscoveryState.READING_IDENTITIES,
+            DiscoveryState.FALLBACK_WIFI_SCAN -> Triple(
+                "Scanning nearby users...",
+                WiFiBadge,
+                Icons.Default.Wifi
+            )
+            DiscoveryState.WIFI_FOUND,
+            DiscoveryState.BLE_FOUND -> Triple(
+                "Found $totalFound user${if (totalFound != 1) "s" else ""} nearby",
+                MeshGreen,
+                Icons.Default.People
+            )
+            DiscoveryState.IDLE -> Triple("", TextMuted, Icons.Default.Wifi)
+        }
+
+        if (stateText.isNotEmpty()) {
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                shape = RoundedCornerShape(10.dp),
+                color = stateColor.copy(alpha = 0.1f)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Animated scanning indicator
+                    if (discoveryState == DiscoveryState.SCANNING_WIFI ||
+                        discoveryState == DiscoveryState.SCANNING_BLE ||
+                        discoveryState == DiscoveryState.READING_IDENTITIES ||
+                        discoveryState == DiscoveryState.FALLBACK_WIFI_SCAN
+                    ) {
+                        val infiniteTransition = rememberInfiniteTransition(label = "scanPulse")
+                        val alpha by infiniteTransition.animateFloat(
+                            initialValue = 0.3f,
+                            targetValue = 1f,
+                            animationSpec = infiniteRepeatable(
+                                animation = tween(600),
+                                repeatMode = RepeatMode.Reverse
+                            ),
+                            label = "scanAlpha"
+                        )
+                        Icon(
+                            imageVector = stateIcon,
+                            contentDescription = null,
+                            tint = stateColor.copy(alpha = alpha),
+                            modifier = Modifier.size(16.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = stateIcon,
+                            contentDescription = null,
+                            tint = stateColor,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Text(
+                        text = stateText,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = stateColor,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Empty state shown when no nearby users are found.
+ */
+@Composable
+private fun EmptyUsersState(discoveryState: DiscoveryState) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -175,17 +348,52 @@ private fun EmptyPeersState() {
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.padding(48.dp)
         ) {
+            // Animated radar icon
+            val infiniteTransition = rememberInfiniteTransition(label = "radarPulse")
+            val radarScale by infiniteTransition.animateFloat(
+                initialValue = 0.9f,
+                targetValue = 1.1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(1500, easing = EaseInOut),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "radarScale"
+            )
+            val radarAlpha by infiniteTransition.animateFloat(
+                initialValue = 0.3f,
+                targetValue = 0.6f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(1500, easing = EaseInOut),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "radarAlpha"
+            )
+
             Icon(
                 imageVector = Icons.Outlined.Radar,
                 contentDescription = null,
-                tint = MeshBlue.copy(alpha = 0.4f),
-                modifier = Modifier.size(80.dp)
+                tint = MeshBlue.copy(alpha = radarAlpha),
+                modifier = Modifier
+                    .size(80.dp)
+                    .then(
+                        if (discoveryState != DiscoveryState.IDLE) {
+                            Modifier.size((80 * radarScale).dp)
+                        } else {
+                            Modifier
+                        }
+                    )
             )
 
             Spacer(modifier = Modifier.height(16.dp))
 
             Text(
-                text = "Scanning for peers...",
+                text = when (discoveryState) {
+                    DiscoveryState.SCANNING_WIFI,
+                    DiscoveryState.SCANNING_BLE,
+                    DiscoveryState.READING_IDENTITIES,
+                    DiscoveryState.FALLBACK_WIFI_SCAN -> "Scanning nearby users..."
+                    else -> "No users found nearby"
+                },
                 style = MaterialTheme.typography.titleMedium,
                 color = TextSecondary,
                 textAlign = TextAlign.Center
@@ -194,7 +402,7 @@ private fun EmptyPeersState() {
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Make sure other AlertNet devices are nearby\nwith Bluetooth and WiFi turned on",
+                text = "Make sure other AlertNet devices are nearby\nwith WiFi turned on",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextMuted,
                 textAlign = TextAlign.Center,

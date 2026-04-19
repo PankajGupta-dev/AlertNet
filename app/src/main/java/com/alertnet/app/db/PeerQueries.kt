@@ -19,7 +19,70 @@ object PeerQueries {
         return peers
     }
 
+    /**
+     * Find a peer by its AlertNet identity UUID.
+     * Used for deduplication when the same physical device is seen via multiple transports.
+     */
+    fun getByAlertnetId(db: SQLiteDatabase, alertnetId: String): MeshPeer? {
+        db.rawQuery(
+            "SELECT * FROM peers WHERE alertnetId = ? LIMIT 1",
+            arrayOf(alertnetId)
+        ).use { cursor ->
+            if (cursor.moveToFirst()) {
+                return cursor.toMeshPeer()
+            }
+        }
+        return null
+    }
+
+    /**
+     * Update the connection status of a peer.
+     */
+    fun updateConnectionStatus(db: SQLiteDatabase, deviceId: String, isConnected: Boolean) {
+        val cv = android.content.ContentValues().apply {
+            put("isConnected", if (isConnected) 1 else 0)
+        }
+        db.update("peers", cv, "deviceId = ?", arrayOf(deviceId))
+    }
+
     fun deleteStale(db: SQLiteDatabase, before: Long) {
         db.delete("peers", "lastSeen < ?", arrayOf(before.toString()))
+    }
+
+    /**
+     * Update a peer's location — called ONLY when processing a LOCATION_PING.
+     * NEVER called for LOCATION_SHARE messages.
+     */
+    fun updatePeerLocation(
+        db: SQLiteDatabase,
+        deviceId: String,
+        latitude: Double,
+        longitude: Double,
+        accuracyMeters: Float,
+        updatedAt: Long
+    ) {
+        val cv = android.content.ContentValues().apply {
+            put("latitude", latitude)
+            put("longitude", longitude)
+            put("location_accuracy_meters", accuracyMeters)
+            put("location_updated_at", updatedAt)
+        }
+        db.update("peers", cv, "deviceId = ?", arrayOf(deviceId))
+    }
+
+    /**
+     * Get all peers that have known GPS coordinates — for map rendering.
+     */
+    fun getPeersWithLocation(db: SQLiteDatabase): List<MeshPeer> {
+        val peers = mutableListOf<MeshPeer>()
+        db.rawQuery(
+            "SELECT * FROM peers WHERE latitude IS NOT NULL AND longitude IS NOT NULL ORDER BY location_updated_at DESC",
+            emptyArray()
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                peers.add(cursor.toMeshPeer())
+            }
+        }
+        return peers
     }
 }

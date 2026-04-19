@@ -28,9 +28,22 @@ object BleConstants {
     val MESSAGE_CHARACTERISTIC: UUID =
         UUID.fromString("f47ac10b-58cc-4372-a567-0e02b2c3d481")
 
+    /** Characteristic for broadcasting AlertNet identity (read): ALERTNET:<uuid>:<username> */
+    val IDENTITY_CHARACTERISTIC: UUID =
+        UUID.fromString("f47ac10b-58cc-4372-a567-0e02b2c3d482")
+
     /** Client Characteristic Configuration Descriptor for notifications */
     val CCCD_UUID: UUID =
         UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+    /** Prefix used to identify AlertNet devices in BLE identity payloads */
+    const val IDENTITY_PREFIX = "ALERTNET"
+
+    /** Maximum bytes available for service data in a BLE advertisement */
+    const val MAX_ADVERTISE_DATA = 20
+
+    /** Timeout for GATT identity reads during discovery (ms) */
+    const val IDENTITY_SCAN_TIMEOUT_MS = 2_000L
 
     /** Maximum BLE MTU we request (Android supports up to 517) */
     const val REQUESTED_MTU = 512

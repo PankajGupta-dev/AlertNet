@@ -1,19 +1,22 @@
 package com.alertnet.app.mesh
 
 /**
- * Represents the current phase of the peer discovery state machine.
- *
- * Flow: IDLE → SCANNING_BLE → (BLE_FOUND | FALLBACK_WIFI_SCAN → WIFI_FOUND) → IDLE
+ * Simplified discovery states — WiFi Direct only.
  */
 enum class DiscoveryState {
     /** Not actively scanning */
     IDLE,
-    /** BLE scan in progress, waiting for results */
+    /** WiFi Direct discovery active, searching for peers */
+    SCANNING_WIFI,
+    /** Peers discovered via WiFi Direct */
+    WIFI_FOUND,
+    // Legacy states kept for backward compatibility with UI
+    /** @deprecated BLE discovery removed — kept so existing UI references compile */
     SCANNING_BLE,
-    /** Peers discovered via BLE, scan paused */
+    /** @deprecated BLE identity reads removed — kept so existing UI references compile */
+    READING_IDENTITIES,
+    /** @deprecated BLE discovery removed — kept so existing UI references compile */
     BLE_FOUND,
-    /** BLE scan timed out with no peers, WiFi Direct discovery active */
-    FALLBACK_WIFI_SCAN,
-    /** Peers discovered via WiFi Direct fallback */
-    WIFI_FOUND
+    /** @deprecated WiFi fallback renamed to SCANNING_WIFI — kept so existing UI references compile */
+    FALLBACK_WIFI_SCAN
 }
