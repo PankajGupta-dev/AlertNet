@@ -1,12 +1,17 @@
 package com.alertnet.app.ui.viewmodel
 
+import android.annotation.SuppressLint
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.alertnet.app.mesh.DiscoveryState
 import com.alertnet.app.mesh.MeshManager
 import com.alertnet.app.mesh.MeshStats
 import com.alertnet.app.model.*
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
 
 /**
  * ViewModel for the peers/discovery screen and mesh stats.
@@ -48,9 +53,15 @@ class PeersViewModel(
         .map { it != DiscoveryState.IDLE }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
+    /** Incoming SOS alerts from other peers */
+    val incomingSOS: SharedFlow<MeshMessage> = meshManager.incomingSOS
+
+    /** Whether SOS is being sent */
+    private val _sosSending = MutableStateFlow(false)
+    val sosSending: StateFlow<Boolean> = _sosSending.asStateFlow()
+
     /**
      * Trigger an immediate peer discovery sweep.
-     * Cancels any ongoing scan cycle and starts a fresh BLE → WiFi scan.
      */
     fun refreshPeers() {
         meshManager.peerDiscoveryManager.requestScan()
@@ -62,4 +73,38 @@ class PeersViewModel(
     fun connectToUser(userId: String) {
         meshManager.connectToUser(userId)
     }
+
+    /**
+     * Send an SOS broadcast with current GPS location to all nearby peers.
+     */
+    @SuppressLint("MissingPermission")
+    fun sendSOS(fusedClient: FusedLocationProviderClient?) {
+        _sosSending.value = true
+
+        if (fusedClient != null) {
+            // Try to get current location for SOS
+            fusedClient.getCurrentLocation(
+                Priority.PRIORITY_HIGH_ACCURACY,
+                CancellationTokenSource().token
+            ).addOnSuccessListener { location ->
+                viewModelScope.launch {
+                    meshManager.sendSOS(location?.latitude, location?.longitude)
+                    _sosSending.value = false
+                }
+            }.addOnFailureListener {
+                // Send SOS without location
+                viewModelScope.launch {
+                    meshManager.sendSOS(null, null)
+                    _sosSending.value = false
+                }
+            }
+        } else {
+            // No location client — send without coordinates
+            viewModelScope.launch {
+                meshManager.sendSOS(null, null)
+                _sosSending.value = false
+            }
+        }
+    }
 }
+

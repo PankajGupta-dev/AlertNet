@@ -24,5 +24,7 @@ enum class MessageType {
     /** Automatic background location broadcast — feeds the live peer map */
     LOCATION_PING,
     /** User-triggered location share — renders as a chat bubble, never updates peer DB */
-    LOCATION_SHARE
+    LOCATION_SHARE,
+    /** Emergency SOS broadcast — sends location + "Help me" to all nearby peers */
+    SOS
 }

@@ -90,6 +90,10 @@ class MeshManager(
     /** Real-time mesh statistics */
     val meshStats: StateFlow<MeshStats> = _meshStats.asStateFlow()
 
+    /** Emits incoming SOS alerts from other peers for the UI to display */
+    private val _incomingSOS = MutableSharedFlow<MeshMessage>(extraBufferCapacity = 8)
+    val incomingSOS: SharedFlow<MeshMessage> = _incomingSOS.asSharedFlow()
+
     private var isRunning = false
 
     // ─── Connection Initiation ──────────────────────────────────
@@ -296,6 +300,40 @@ class MeshManager(
     }
 
     /**
+     * Send an SOS broadcast to ALL nearby peers.
+     * Includes current GPS coordinates (if available) and a "HELP ME!" message.
+     * targetId = null → broadcasts to everyone.
+     */
+    suspend fun sendSOS(lat: Double?, lon: Double?) {
+        val sosPayload = buildString {
+            append("🆘 SOS — HELP ME!")
+            if (lat != null && lon != null) {
+                append("\nLocation: $lat, $lon")
+            }
+        }
+        val encrypted = encryptPayload(sosPayload) ?: sosPayload
+
+        val message = MeshMessage(
+            id = UUID.randomUUID().toString(),
+            senderId = deviceId,
+            targetId = null,  // broadcast to all
+            type = MessageType.SOS,
+            payload = encrypted,
+            timestamp = System.currentTimeMillis(),
+            ttl = 7,
+            hopCount = 0,
+            hopPath = listOf(deviceId),
+            status = DeliveryStatus.QUEUED
+        )
+
+        deduplicationManager.markSeen(message.id)
+        repository.insertMessage(message)
+        sendViaTransport(message)
+        updateStats()
+        Log.d(TAG, "SOS broadcast sent")
+    }
+
+    /**
      * Send a LOCATION_SHARE message to a specific peer (chat bubble).
      * Does NOT update peer location — it's a chat artifact only.
      */
@@ -425,6 +463,14 @@ class MeshManager(
 
             is RoutingDecision.LocationPingReceived -> {
                 handleIncomingLocationPing(decision.message)
+            }
+
+            is RoutingDecision.SOSReceived -> {
+                val delivered = decision.message.copy(status = DeliveryStatus.DELIVERED)
+                repository.insertMessage(delivered)
+                _incomingSOS.emit(delivered)
+                Log.d(TAG, "SOS received from ${decision.message.senderId}")
+                updateStats()
             }
         }
     }

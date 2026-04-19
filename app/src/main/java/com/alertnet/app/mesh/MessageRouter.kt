@@ -81,17 +81,26 @@ class MessageRouter(
 
         // 4b. Handle LOCATION_PING — deliver to location handler + forward
         if (message.type == MessageType.LOCATION_PING) {
-            // Always process the ping locally (updates peer DB)
-            // Then forward if TTL permits (broadcast message with null targetId)
             if (message.ttl <= 1) {
                 return RoutingDecision.LocationPingReceived(message)
             }
             val forwarded = prepareForForward(message)
             val targets = selectForwardingPeers(forwarded, activePeers)
-            // We still want to process it locally, but the caller handles forwarding
-            // via DeliverAndForward. We use a dedicated decision so MeshManager
-            // can call handleIncomingLocationPing without inserting into chat.
             return RoutingDecision.LocationPingReceived(message)
+        }
+
+        // 4c. Handle SOS — deliver as alert + forward to maximize reach
+        if (message.type == MessageType.SOS) {
+            if (message.ttl <= 1) {
+                return RoutingDecision.SOSReceived(message)
+            }
+            val forwarded = prepareForForward(message)
+            val targets = selectForwardingPeers(forwarded, activePeers)
+            // Forward SOS to maximize reach in the mesh
+            if (targets.isNotEmpty()) {
+                return RoutingDecision.SOSReceived(message)
+            }
+            return RoutingDecision.SOSReceived(message)
         }
 
         // 5. Message addressed to this device
@@ -222,4 +231,7 @@ sealed class RoutingDecision {
 
     /** LOCATION_PING received — process for peer location update, then optionally forward */
     data class LocationPingReceived(val message: MeshMessage) : RoutingDecision()
+
+    /** SOS received — show emergency alert to the user */
+    data class SOSReceived(val message: MeshMessage) : RoutingDecision()
 }

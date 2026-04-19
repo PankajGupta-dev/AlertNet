@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
@@ -62,8 +63,62 @@ fun PeersScreen(
     onRefresh: () -> Unit,
     onStatsClick: () -> Unit,
     onMapClick: () -> Unit = {},
-    onLocationSettingsClick: () -> Unit = {}
+    onLocationSettingsClick: () -> Unit = {},
+    onSOSClick: () -> Unit = {},
+    sosSending: Boolean = false
 ) {
+    var showSOSDialog by remember { mutableStateOf(false) }
+
+    // SOS Confirmation Dialog
+    if (showSOSDialog) {
+        AlertDialog(
+            onDismissRequest = { showSOSDialog = false },
+            containerColor = SurfaceCard,
+            titleContentColor = StatusFailed,
+            textContentColor = TextSecondary,
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = null,
+                    tint = StatusFailed,
+                    modifier = Modifier.size(48.dp)
+                )
+            },
+            title = {
+                Text(
+                    "Send SOS Alert?",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 20.sp
+                )
+            },
+            text = {
+                Text(
+                    "This will broadcast your location and an emergency \"HELP ME\" message to ALL nearby AlertNet devices.\n\nOnly use this in real emergencies.",
+                    textAlign = TextAlign.Center,
+                    lineHeight = 20.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showSOSDialog = false
+                        onSOSClick()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = StatusFailed
+                    )
+                ) {
+                    Text("SEND SOS", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSOSDialog = false }) {
+                    Text("Cancel", color = TextMuted)
+                }
+            }
+        )
+    }
+
     Scaffold(
         containerColor = MeshNavy,
         topBar = {
@@ -112,6 +167,55 @@ fun PeersScreen(
                     containerColor = MeshNavy
                 )
             )
+        },
+        floatingActionButton = {
+            // Pulsing SOS FAB
+            val infiniteTransition = rememberInfiniteTransition(label = "sosPulse")
+            val pulseScale by infiniteTransition.animateFloat(
+                initialValue = 1f,
+                targetValue = 1.08f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(800, easing = EaseInOut),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "sosFabPulse"
+            )
+            val pulseAlpha by infiniteTransition.animateFloat(
+                initialValue = 0.85f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(800, easing = EaseInOut),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "sosFabAlpha"
+            )
+
+            LargeFloatingActionButton(
+                onClick = { showSOSDialog = true },
+                containerColor = StatusFailed.copy(alpha = pulseAlpha),
+                contentColor = TextPrimary,
+                shape = CircleShape,
+                modifier = Modifier
+                    .size((72 * pulseScale).dp)
+            ) {
+                if (sosSending) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(28.dp),
+                        color = TextPrimary,
+                        strokeWidth = 3.dp
+                    )
+                } else {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "SOS",
+                            fontWeight = FontWeight.ExtraBold,
+                            fontSize = 18.sp
+                        )
+                    }
+                }
+            }
         }
     ) { padding ->
         Column(
