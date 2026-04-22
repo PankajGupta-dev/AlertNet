@@ -68,4 +68,4 @@ Feel free to check the [issues page](../../issues).
 
 ## 📄 License
 
-[Add your license information here]
+Distributed under the MIT License. See `LICENSE` for more information.
